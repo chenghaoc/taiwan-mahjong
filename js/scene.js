@@ -252,9 +252,11 @@
     t.phys = null;
   }
 
-  // ---- 桌上的小東西：籌碼、莊家牌、茶杯 ----
-  const props = [], stacks = [[], [], [], []];
-  let dealerBlock;
+  // ---- 桌上的小東西：籌碼、莊家牌 ----
+  // 籌碼就是每家手上的現金：開局各 STAKE，之後跟著輸贏走
+  const STAKE = 5000, DENOMS = [500, 100, 20];
+  const props = [], stacks = [0, 1, 2, 3].map(() => DENOMS.map(() => []));
+  let dealerBlock, chipGeo, chipMats;
   // 讓道具沿拋物線飛到定點
   function fly(obj, to, o) {
     const k = S.reduced ? 0.4 : 1;
@@ -262,16 +264,23 @@
   }
   const dealerSpot = pid => place(pid, -32.5, 0.7, 38, Q_STAND).pos;
   function buildProps() {
-    const chipGeo = new T.CylinderGeometry(1.1, 1.1, 0.28, 28);
-    const colors = [0xb8322b, 0x23508f, 0xe9e2cf, 0x1f7a4d];
-    const chipMats = colors.map(c => new T.MeshStandardMaterial({ color: c, roughness: 0.45, envMapIntensity: 0.6 }));
-    for (let pid = 0; pid < 4; pid++) for (let i = 0; i < 15; i++) {
-      const chip = new T.Mesh(chipGeo, chipMats[Math.floor(i / 5 + pid) % 4]);
-      chip.castShadow = chip.receiveShadow = true;
-      scene.add(chip);
-      stacks[pid].push(chip);
-    }
-    layoutChips(false);
+    // 三種面額：紅 500、藍 100、白 20，面額印在籌碼正面
+    chipGeo = new T.CylinderGeometry(1.1, 1.1, 0.28, 28);
+    chipMats = [['#b8322b', '#f4ead2'], ['#23508f', '#f4ead2'], ['#e9e2cf', '#2a2a2a']].map(([bg, fg], d) => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 128;
+      const x = c.getContext('2d');
+      x.fillStyle = bg; x.fillRect(0, 0, 128, 128);
+      x.strokeStyle = fg; x.lineWidth = 6; x.setLineDash([14, 10]);
+      x.beginPath(); x.arc(64, 64, 52, 0, Math.PI * 2); x.stroke();
+      x.fillStyle = fg; x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.font = '700 46px Georgia, serif';
+      x.fillText(DENOMS[d], 64, 67);
+      const side = new T.MeshStandardMaterial({ color: bg, roughness: 0.45, envMapIntensity: 0.6 });
+      const face = new T.MeshStandardMaterial({ map: new T.CanvasTexture(c), roughness: 0.45, envMapIntensity: 0.6 });
+      return [side, face, side];
+    });
+    syncChips(false);
 
     const dc = document.createElement('canvas');
     dc.width = dc.height = 128;
@@ -287,46 +296,59 @@
     dealerBlock.castShadow = true;
     dealerBlock.position.copy(dealerSpot(0));
     scene.add(dealerBlock);
-
-    const china = new T.MeshStandardMaterial({ color: 0xf2efe6, roughness: 0.25, side: T.DoubleSide, envMapIntensity: 0.8 });
-    const tea = new T.MeshStandardMaterial({ color: 0x8a5a1e, roughness: 0.15, envMapIntensity: 1 });
-    for (let pid = 0; pid < 4; pid++) {
-      const cup = new T.Group();
-      const saucer = new T.Mesh(new T.CylinderGeometry(2.1, 1.5, 0.3, 32), china);
-      saucer.position.y = 0.15;
-      const wall = new T.Mesh(new T.CylinderGeometry(1.35, 1.0, 1.7, 32, 1, true), china);
-      wall.position.y = 1.15;
-      const base = new T.Mesh(new T.CircleGeometry(1.0, 32), china);
-      base.rotation.x = -Math.PI / 2; base.position.y = 0.32;
-      const liquid = new T.Mesh(new T.CircleGeometry(1.22, 32), tea);
-      liquid.rotation.x = -Math.PI / 2; liquid.position.y = 1.62;
-      cup.add(saucer, wall, base, liquid);
-      cup.traverse(m => { m.castShadow = true; });
-      cup.position.copy(place(pid, -38.5, 0, 38, Q_STAND).pos);
-      scene.add(cup);
+  }
+  // 現金換成籌碼：大面額優先，小面額各多留一疊零錢
+  function chipCounts(cash) {
+    const n = DENOMS.map(() => 0), min = DENOMS[DENOMS.length - 1];
+    let rest = Math.max(0, Math.floor(cash / min)) * min;
+    for (let d = DENOMS.length - 1; d > 0; d--) {
+      const up = DENOMS[d - 1];
+      n[d] = (rest % up) / DENOMS[d];
+      rest -= n[d] * DENOMS[d];
+      if (rest >= up) { n[d] += up / DENOMS[d]; rest -= up; }
     }
+    n[0] = rest / DENOMS[0];
+    return n;
   }
-  // 每家的籌碼八枚一疊，疊滿往旁邊排
-  function layoutChips(animate) {
-    let moved = 0;
-    stacks.forEach((list, pid) => list.forEach((chip, j) => {
-      const col = Math.floor(j / 8);
-      const to = place(pid, -39.5 + (col % 4) * 2.5, 0.15 + (j % 8) * 0.3, 31 + Math.floor(col / 4) * 2.5, Q_STAND).pos;
-      if (chip.position.distanceTo(to) < 0.01) return;
-      if (animate) fly(chip, to, { dur: 520, arc: 9, delay: moved++ * 80, done: () => tone(rnd(2300, 2900), 0.07, 0.12, 'triangle') });
-      else chip.position.copy(to);
-    }));
-  }
-  // 結算：輸家每 100 分推一枚籌碼給贏家（最多六枚）
-  S.pay = deltas => {
-    const winner = deltas.findIndex(d => d > 0);
-    if (winner < 0) return;
-    deltas.forEach((d, pid) => {
-      if (d >= 0) return;
-      for (let k = Math.max(1, Math.min(6, Math.round(-d / 100))); k > 0 && stacks[pid].length; k--) stacks[winner].push(stacks[pid].pop());
+  // 讓桌上的籌碼等於每家現在的現金：多的從牌堆頂拿走飛給不夠的人，找零的直接換
+  function syncChips(animate) {
+    const want = stacks.map((_, pid) => chipCounts(STAKE + (game ? game.players[pid].score : 0)));
+    const fresh = new Set();
+    DENOMS.forEach((_, d) => {
+      const spare = [];
+      stacks.forEach((s, pid) => { while (s[d].length > want[pid][d]) spare.push(s[d].pop()); });
+      stacks.forEach((s, pid) => {
+        while (s[d].length < want[pid][d]) {
+          let chip = spare.pop();
+          if (!chip) {
+            chip = new T.Mesh(chipGeo, chipMats[d]);
+            chip.castShadow = chip.receiveShadow = true;
+            scene.add(chip);
+            fresh.add(chip);
+          }
+          s[d].push(chip);
+        }
+      });
+      spare.forEach(chip => scene.remove(chip));
     });
-    layoutChips(true);
-  };
+    if (!animate) for (let i = props.length - 1; i >= 0; i--) if (props[i].obj !== dealerBlock) props.splice(i, 1);
+    // 每種面額自己排，十枚一疊，疊滿往旁邊排
+    let moved = 0;
+    stacks.forEach((s, pid) => {
+      let col = 0;
+      s.forEach(list => {
+        list.forEach((chip, j) => {
+          const c = col + Math.floor(j / 10);
+          const to = place(pid, -39.5 + (c % 4) * 2.5, 0.15 + (j % 10) * 0.3, 31 + Math.floor(c / 4) * 2.5, Q_STAND).pos;
+          if (!animate || fresh.has(chip)) chip.position.copy(to);
+          else if (chip.position.distanceTo(to) > 0.01) fly(chip, to, { dur: 520, arc: 9, delay: moved++ * 80, done: () => tone(rnd(2300, 2900), 0.07, 0.12, 'triangle') });
+        });
+        col += Math.ceil(list.length / 10);
+      });
+    });
+  }
+  // 結算：輸家把錢推給贏家
+  S.pay = () => syncChips(true);
 
   // 每局換一組的固定亂數：同一個位置每次算出來都一樣，牌才不會自己亂動
   const jrand = k => { const x = Math.sin(k * 127.1 + S.seed * 311.7) * 43758.5453; return (x - Math.floor(x)) * 2 - 1; };
@@ -782,12 +804,10 @@
     .sort((a, b) => a.idx - b.idx)
     .map(t => toScreen(new T.Vector3(t.pos.x, 6.4, ROW - 3.3)));
 
-  S.setGame = g => {
+  S.setGame = (g, fresh) => {
     game = g;
-    // 新的一場：籌碼重新平分
-    const all = [].concat(...stacks);
-    stacks.forEach((list, pid) => { list.length = 0; list.push(...all.slice(pid * 15, pid * 15 + 15)); });
-    layoutChips(false);
+    // 新的一場或新的一局：籌碼直接擺成現在的現金
+    if (fresh) syncChips(false);
   };
 
   // ---- 牌局狀態 → 每張牌該在哪 ----

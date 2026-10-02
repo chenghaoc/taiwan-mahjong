@@ -303,7 +303,7 @@
 
   async function playLocal(rounds) {
     game = new MJ.Game({ names: ['你', '阿明', '美玲', '老陳'], agents: [human, MJ.ai, MJ.ai, MJ.ai], ui, rounds });
-    S.setGame(game);
+    S.setGame(game, true);
     $('#hud').hidden = false;
     while (!game.over) {
       const r = await game.playHand();
@@ -312,7 +312,7 @@
       // 結算前把四家的手牌都攤開
       S.revealAll = true;
       S.rest();
-      S.pay(r.deltas);
+      S.pay();
       refresh();
       await sleep(r.type === 'draw' ? 1600 : 900);
       await showResult(r);
@@ -332,7 +332,7 @@
   }
   function show(state, fresh) {
     game = MJ.net.view(state, fresh);
-    S.setGame(game);
+    S.setGame(game, fresh);
   }
 
   async function playNet() {
@@ -385,7 +385,7 @@
         } else if (m.t === 'result') {
           show(m.state);
           S.rest();
-          S.pay(m.r.deltas);
+          S.pay();
           refresh();
           // 不擋住後面的訊息：主機等太久會直接發下一局
           showResult(m.r).then(() => {
