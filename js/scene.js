@@ -34,6 +34,7 @@
   // 沿桌邊排列時，哪個方向對我來說是「由左到右／由遠到近」
   const order = pid => (pid === 1 || pid === 2 ? -1 : 1);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const smooth = k => k * k * (3 - 2 * k);
 
   let renderer, scene, camera, world, game = null;
   const IVORY = 0xece4cf;
@@ -761,6 +762,7 @@
     window.addEventListener('resize', resize);
     resize();
     drawPlate();
+    buildHands();
     requestAnimationFrame(frame);
   };
 
@@ -904,23 +906,30 @@
   // o: dur 毫秒、arc 拋物線高度、spin 翻滾圈數、delay、pre 起飛前先提起的時間、land 落桌效果（true 或 'big'）
   function go(t, slot, o) {
     if (t.phys) endPhys(t);
+    // 剛摸進來還在飛的那張先歸位，手才不會伸到半空中去抓
+    else if (o.grab && t.tw) { t.g.position.copy(t.pos); t.g.quaternion.copy(t.quat); }
     t.pos.copy(slot.pos); t.quat.copy(slot.quat);
     const s0 = t.g.scale.x;
     t.scale = slot.scale || 1;
     const k = S.reduced ? 0.4 : 1, pre = S.reduced ? 0 : o.pre || 0;
+    const grab = pre && o.grab ? o.grab : 0;
     t.tw = {
-      s0, pre, phys: !!o.phys && !S.reduced,
+      s0, pre, grab, phys: !!o.phys && !S.reduced,
       p0: t.g.position.clone(), q0: t.g.quaternion.clone(),
       t0: performance.now() + (o.delay || 0) * k + pre,
       dur: o.dur * k, arc: (o.arc || 0) * k, spin: S.reduced ? 0 : o.spin || 0, land: o.land || false,
     };
+    if (grab) reach(hands[slot.owner], t);
   }
 
   function motion(t, slot, dist) {
     const from = t.zone, to = slot.zone, other = slot.owner !== 0;
     const delay = S.dealing ? t.ring * 9 : 0;
-    // 電腦出牌：先從手牌裡抽起來，再翻滾著打出去
-    if (to === 'discard' && from !== 'discard') return { phys: true, dur: 300, arc: 4, land: true, pre: other ? 240 : 0 };
+    // 別家出牌：手先伸過去捏住，從手牌裡抽起來，再甩出去（手還沒載好就只有牌自己動）
+    if (to === 'discard' && from !== 'discard') {
+      const hand = other && hands[slot.owner];
+      return { phys: true, dur: 300, arc: 4, land: true, pre: hand ? 560 : other ? 240 : 0, grab: hand ? 340 : 0 };
+    }
     // 吃碰槓：被叫的那張貼著桌面滑過去，手裡的牌翻開跟上
     if (to === 'meld' && from === 'discard') return { dur: 430, arc: 1, land: true, pre: 150 };
     if (to === 'meld') return { dur: 460, arc: 5, land: true, pre: other ? 160 : 0 };
@@ -1243,10 +1252,185 @@
     plateTex.needsUpdate = true;
   }
 
+  // ---- 對手的手 ----
+  // 三位對手各一隻右手：手掌是 WebXR 的 generic-hand 模型（單位公尺），袖子與手臂用圓柱接到畫面外的肩膀。
+  // 模型的關節全是平輩，載入後照手指重新串成父子，才能一節一節彎。
+  // 模型沒載到（例如直接開檔案）就沒有手，牌照舊自己飛。
+  const HAND_SCALE = 102;                   // 桌上一單位約 0.9 公分
+  const SLEEVES = [0, 0x2c4766, 0x7b3340, 0x3d4a3c];
+  const UPPER = 31, FORE = 30;              // 上臂、前臂長
+  const hands = [];
+  // 每節往掌心彎的角度：[放鬆, 捏牌]，依序是近節、中節、遠節
+  const CURL = {
+    index: [[0.2, 0.75], [0.3, 0.75], [0.15, 0.35]],
+    middle: [[0.25, 0.8], [0.3, 0.8], [0.15, 0.35]],
+    ring: [[0.3, 1.25], [0.35, 1.2], [0.2, 0.6]],
+    pinky: [[0.35, 1.35], [0.35, 1.2], [0.2, 0.6]],
+  };
+  // 模型裡手指朝 -Y、掌心朝 -X、拇指在 -Z；轉成手指朝 -z、掌心朝下
+  const HAND_BASIS = new T.Quaternion().setFromRotationMatrix(
+    new T.Matrix4().makeBasis(new T.Vector3(0, 1, 0), new T.Vector3(0, 0, 1), new T.Vector3(1, 0, 0)));
+  const Q_HAND_REST = new T.Quaternion().setFromAxisAngle(Y, 0.45).multiply(rotX(-0.25));
+  const Q_HAND_GRAB = new T.Quaternion().setFromAxisAngle(Y, 0.1).multiply(rotX(-0.95));
+
+  function buildHands() {
+    if (!T.GLTFLoader) return;
+    const skin = new T.MeshStandardMaterial({ color: 0xd8a47f, roughness: 0.62, envMapIntensity: 0.35 });
+    for (let pid = 1; pid < 4; pid++) {
+      new T.GLTFLoader().load('models/hand-right.glb', gltf => { hands[pid] = makeHand(pid, gltf.scene, skin); }, undefined, () => {});
+    }
+  }
+
+  function makeHand(pid, model, skin) {
+    const bone = {};
+    model.updateMatrixWorld(true);
+    model.traverse(o => {
+      if (o.isBone) bone[o.name] = o;
+      if (o.isSkinnedMesh) { o.material = skin; o.castShadow = true; o.frustumCulled = false; }
+    });
+    const wq = o => o.getWorldQuaternion(new T.Quaternion());
+    const wp = o => o.getWorldPosition(new T.Vector3());
+    // 關節：接到上一節底下，記住原本的角度，以及在上一節座標裡的彎曲軸
+    const joints = [];
+    const hinge = (name, parent, axis, bend) => {
+      const b = bone[name];
+      parent.attach(b);
+      joints.push({ b, q0: b.quaternion.clone(), ax: axis.clone().applyQuaternion(wq(parent).invert()), bend });
+      return b;
+    };
+    const flex = new T.Vector3(0, 0, -1), none = [0, 0];
+    for (const f in CURL) {
+      let p = hinge(f + '-finger-metacarpal', bone.wrist, flex, none);
+      ['proximal', 'intermediate', 'distal'].forEach((seg, i) => { p = hinge(`${f}-finger-phalanx-${seg}`, p, flex, CURL[f][i]); });
+      p.attach(bone[f + '-finger-tip']);
+    }
+    const pose = c => {
+      for (const j of joints) j.b.quaternion.setFromAxisAngle(j.ax, j.bend[0] + (j.bend[1] - j.bend[0]) * c).multiply(j.q0);
+    };
+    // 拇指：繞著「拇指根 → 食指中指指尖」這個平面轉過去對捏
+    pose(1);
+    model.updateMatrixWorld(true);
+    const pads = () => wp(bone['index-finger-tip']).lerp(wp(bone['middle-finger-tip']), 0.5);
+    const base = wp(bone['thumb-metacarpal']);
+    const along = wp(bone['thumb-tip']).sub(base), want = pads().sub(base);
+    const swing = along.clone().cross(want).normalize(), ang = along.angleTo(want);
+    let p = hinge('thumb-metacarpal', bone.wrist, swing, [0, ang * 0.72]);
+    p = hinge('thumb-phalanx-proximal', p, swing, [0.05, 0.25]);
+    p = hinge('thumb-phalanx-distal', p, swing, [0.05, 0.2]);
+    p.attach(bone['thumb-tip']);
+
+    // 手腕放在原點
+    const g = new T.Group(), fit = new T.Group();
+    fit.quaternion.copy(HAND_BASIS);
+    fit.scale.setScalar(HAND_SCALE);
+    fit.position.copy(wp(bone.wrist)).multiplyScalar(-HAND_SCALE).applyQuaternion(HAND_BASIS);
+    fit.add(model);
+    g.add(fit);
+    // 捏牌時拇指與食指中指之間的那一點，相對手腕的位置
+    pose(1);
+    g.updateMatrixWorld(true);
+    const grip = pads().lerp(wp(bone['thumb-tip']), 0.5);
+    pose(0);
+
+    // 袖子：前臂、手肘、上臂
+    const cloth = new T.MeshStandardMaterial({ color: SLEEVES[pid], roughness: 0.9, envMapIntensity: 0.2 });
+    const part = geo => {
+      const m = new T.Mesh(geo, cloth);
+      m.castShadow = true;
+      scene.add(m);
+      return m;
+    };
+    const fore = part(new T.CylinderGeometry(3.5, 4.3, 1, 20));
+    const upper = part(new T.CylinderGeometry(4.3, 5, 1, 20));
+    const elbow = part(new T.SphereGeometry(4.3, 20, 12));
+    const cuff = part(new T.SphereGeometry(3.7, 20, 12));
+    scene.add(g);
+
+    // 休息時擱在自己右手邊的桌角，不壓到吃碰槓的牌
+    const rest = place(pid, 48, 3.2, 50, Q_STAND).pos;
+    const h = {
+      pid, g, pose, grip, fore, upper, elbow, cuff, rest, p: rest.clone(), job: null,
+      shoulder: place(pid, 24, 27, 80, Q_STAND).pos,
+      // 手肘的方向：休息時垂在外下方，伸手拿牌時抬起來
+      pole0: new T.Vector3(0.75, -0.6, 0.25).applyQuaternion(seatQ[pid]),
+      pole1: new T.Vector3(0.65, 0.6, 0.2).applyQuaternion(seatQ[pid]),
+    };
+    setHand(h, 0);
+    return h;
+  }
+
+  const hQ = new T.Quaternion(), hA = new T.Vector3(), hB = new T.Vector3(), hC = new T.Vector3(), hS = new T.Vector3();
+  function limb(m, from, to) {
+    hC.subVectors(to, from);
+    const len = hC.length();
+    m.position.copy(from).addScaledVector(hC, 0.5);
+    m.scale.set(1, len, 1);
+    m.quaternion.setFromUnitVectors(Y, hC.divideScalar(len));
+  }
+  // 把捏點放到 h.p；c 從 0（放鬆）到 1（捏住）
+  function setHand(h, c) {
+    h.pose(c);
+    hQ.copy(Q_HAND_REST).slerp(Q_HAND_GRAB, c).premultiply(seatQ[h.pid]);
+    h.g.quaternion.copy(hQ);
+    const wrist = h.g.position.copy(h.p).sub(hA.copy(h.grip).applyQuaternion(hQ));
+    // 手臂：肩膀固定在椅子上方，搆不到就往前傾
+    hS.copy(h.shoulder);
+    let d = hS.distanceTo(wrist);
+    const max = UPPER + FORE - 1.5;
+    if (d > max) { hS.lerp(wrist, 1 - max / d); d = max; }
+    hA.subVectors(wrist, hS).divideScalar(d);
+    const a = (UPPER * UPPER - FORE * FORE + d * d) / (2 * d);
+    hB.copy(h.pole0).lerp(h.pole1, c);
+    hB.addScaledVector(hA, -hB.dot(hA)).normalize();
+    h.cuff.position.copy(wrist);
+    h.elbow.position.copy(hS).addScaledVector(hA, a).addScaledVector(hB, Math.sqrt(Math.max(0, UPPER * UPPER - a * a)));
+    limb(h.fore, h.elbow.position, wrist);
+    limb(h.upper, hS, h.elbow.position);
+  }
+
+  // 伸手去拿 t：tw.grab 毫秒內到位捏住，跟著牌提起，起飛時順勢往前一送再收回
+  function reach(h, t) {
+    if (!h) return;
+    const lift = t.tw.t0, from = lift - t.tw.pre;
+    h.job = { t, from, at: from + t.tw.grab, lift, sent: lift + 170, back: lift + 170 + 480, p0: null, p1: new T.Vector3(), p2: null };
+  }
+  function moveHands(now) {
+    for (const h of hands) {
+      if (!h) continue;
+      const j = h.job;
+      let c = 0;
+      if (j && now >= j.from) {
+        if (now < j.lift) {
+          // 捏在牌的上半截
+          j.p1.copy(j.t.g.position);
+          j.p1.y += H / 2 - 1;
+          if (!j.p0) j.p0 = h.p.clone();
+          c = Math.min(1, (now - j.from) / (j.at - j.from));
+          const k = smooth(c);
+          h.p.lerpVectors(j.p0, j.p1, k);
+          h.p.y += 14 * k * (1 - k);
+        } else if (now < j.sent) {
+          if (!j.p2) {
+            // 往落點的方向送一小段
+            j.p2 = j.t.pos.clone().sub(j.p1).setY(0);
+            j.p2.multiplyScalar(Math.min(0.3, 10 / (j.p2.length() || 1))).add(j.p1).setY(j.p1.y + 2.5);
+          }
+          const k = (now - j.lift) / (j.sent - j.lift);
+          h.p.lerpVectors(j.p1, j.p2, k * (2 - k));
+          c = 1 - k;
+        } else if (now < j.back) {
+          const k = smooth((now - j.sent) / (j.back - j.sent));
+          h.p.lerpVectors(j.p2 || j.p1, h.rest, k);
+          h.p.y += 10 * k * (1 - k);
+        } else { h.job = null; h.p.copy(h.rest); }
+      }
+      setHand(h, c);
+    }
+  }
+
   // ---- 每一幀 ----
   const vTmp = new T.Vector3();
   const tmpQ = new T.Quaternion(), spinAxis = new T.Vector3(1, 0.25, 0).normalize();
-  const smooth = k => k * k * (3 - 2 * k);
   const PRE_LIFT = 1.5;
   let lastNow = performance.now();
   function frame(now) {
@@ -1270,9 +1454,10 @@
         let k = (now - tw.t0) / tw.dur;
         if (k < 0) {
           // 起飛前先提起
-          if (tw.pre && now > tw.t0 - tw.pre) {
+          const lift0 = tw.t0 - tw.pre + tw.grab;
+          if (tw.pre && now > lift0) {
             g.position.copy(tw.p0);
-            g.position.y += PRE_LIFT * smooth((now - (tw.t0 - tw.pre)) / tw.pre);
+            g.position.y += PRE_LIFT * smooth((now - lift0) / (tw.pre - tw.grab));
           }
           continue;
         }
@@ -1299,6 +1484,8 @@
         else g.position.y = t.pos.y + 0.55 * Math.sin(Math.PI * b) * (1 - b);
       }
     }
+
+    moveHands(now);
 
     for (const d of dice) {
       if (!d.live) continue;
