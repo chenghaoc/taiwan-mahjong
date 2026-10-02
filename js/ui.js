@@ -6,12 +6,28 @@
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const tile = MJ.tileHtml, back = MJ.backHtml;
   const ROLE = ['', '下家', '對家', '上家'];
-  const DELAY = { draw: 380, discard: 700, call: 1000, flower: 650 };
+  const DELAY = { draw: 380, discard: 1150, call: 1100, flower: 650 };
   const signed = n => (n > 0 ? '+' + n : String(n));
 
   let game = null;
   let pending = null;   // 等真人決定：{kind:'turn'|'claim', o, tile, from, resolve}
   let selected = -1;
+  let analysis = null;  // 輪到我時，每種牌打掉後的向聽數與進張
+
+  // ---- 偏好設定（存在瀏覽器裡）----
+  const prefs = { muted: false, tips: true, reduced: window.matchMedia('(prefers-reduced-motion: reduce)').matches };
+  try { Object.assign(prefs, JSON.parse(localStorage.getItem('mj-prefs') || '{}')); } catch (e) { /* 沒有儲存空間就用預設 */ }
+  function applyPrefs() {
+    S.muted = prefs.muted;
+    S.reduced = prefs.reduced;
+    $('#mute').textContent = prefs.muted ? '音效：關' : '音效：開';
+    $('#tips-toggle').textContent = prefs.tips ? '提示：開' : '提示：關';
+    $('#motion').textContent = prefs.reduced ? '動畫：精簡' : '動畫：完整';
+    try { localStorage.setItem('mj-prefs', JSON.stringify(prefs)); } catch (e) { /* 同上 */ }
+  }
+  for (const [id, key] of [['#mute', 'muted'], ['#tips-toggle', 'tips'], ['#motion', 'reduced']]) {
+    $(id).addEventListener('click', () => { prefs[key] = !prefs[key]; applyPrefs(); refresh(); });
+  }
 
   function meldHtml(m) {
     let ts;
@@ -31,31 +47,57 @@
       `<span class="score">${signed(p.score)}</span></div>`;
   }
 
+  // 聽的牌，各標出還剩幾張；已經絕張的變暗
+  function waitList(c, need) {
+    const ws = MJ.waits(c, need);
+    if (!ws.length) return '';
+    const u = MJ.ai.unseen(game, 0);
+    return ws.map(t => {
+      const left = Math.max(0, u[t]);
+      return tile(t, 't-xs' + (left ? '' : ' dead')) + `<small>×${left}</small>`;
+    }).join('');
+  }
+
   function hintHtml(me) {
     const need = 5 - me.melds.length;
-    const waitList = c => {
-      const ws = MJ.waits(c, need);
-      if (!ws.length) return '';
-      const u = MJ.ai.unseen(game, 0);
-      const left = ws.reduce((s, t) => s + Math.max(0, u[t]), 0);
-      return ws.map(t => tile(t, 't-xs')).join('') + `<span>（還有 ${left} 張）</span>`;
-    };
     if (pending && pending.kind === 'claim') {
       return `<span>${game.players[pending.from].name}打出</span>${tile(pending.tile, 't-xs')}<span>，要嗎？` +
         `${pending.secs ? `（${pending.secs} 秒內沒選算過）` : ''}</span>`;
     }
     if (pending && pending.kind === 'turn') {
-      if (selected < 0) return '<span>輪到你了。點一張牌選取，再點一次打出。</span>';
+      if (selected < 0) {
+        return '<span>輪到你了。點一張牌選取，再點一次打出。</span>' +
+          (prefs.tips ? '<span class="dim">牌上的數字是打掉它之後的進張數</span>' : '');
+      }
+      const k = me.hand[selected], name = MJ.tileName(k);
       const c = MJ.toCounts(me.hand);
-      c[me.hand[selected]]--;
-      const w = waitList(c);
-      return w ? `<span>打出後聽</span>${w}` : `<span>再點一次打出${MJ.tileName(me.hand[selected])}</span>`;
+      c[k]--;
+      const w = waitList(c, need);
+      if (w) return `<span>打出${name}後聽</span>${w}`;
+      const a = prefs.tips && analysis && analysis.find(x => x.k === k);
+      return a
+        ? `<span>打出${name}：${a.s} 向聽，有效進張 ${a.uke} 張。再點一次打出。</span>`
+        : `<span>再點一次打出${name}</span>`;
     }
     if (me.hand.length % 3 === 1) {
-      const w = waitList(MJ.toCounts(me.hand));
+      const w = waitList(MJ.toCounts(me.hand), need);
       if (w) return `<span>聽牌</span>${w}`;
     }
     return '';
+  }
+
+  // 每張手牌上方的進張數：只標向聽數最好的那些，其中進張最多的用金色
+  function renderTips() {
+    const box = $('#tips');
+    if (!game || !prefs.tips || !analysis || !pending || pending.kind !== 'turn') { box.innerHTML = ''; return; }
+    const min = Math.min(...analysis.map(a => a.s));
+    const top = Math.max(...analysis.filter(a => a.s === min).map(a => a.uke));
+    const pts = S.handPoints(), hand = game.players[0].hand;
+    box.innerHTML = hand.map((k, i) => {
+      const a = analysis.find(x => x.k === k);
+      if (!a || a.s !== min || !pts[i]) return '';
+      return `<span class="tip${a.uke === top ? ' best' : ''}" style="left:${pts[i].x}px;top:${pts[i].y}px">${a.uke}</span>`;
+    }).join('');
   }
 
   function actionsHtml() {
@@ -89,7 +131,9 @@
     S.pickable = !!pending && pending.kind === 'turn';
     S.selected = selected;
     S.sync();
+    renderTips();
   }
+  S.onResize = renderTips;
 
   function shout(pid, text) {
     const el = $('#shout'), p = S.screen(pid);
@@ -102,12 +146,21 @@
     void el.offsetWidth;
     el.style.animation = '';
   }
+  S.onDice = (dealer, sum) => {
+    shout(dealer, `${sum} 點`);
+    setTimeout(() => { $('#shout').hidden = true; }, 850);
+  };
 
   // ---- 真人玩家 ----
   const human = {
     isHuman: true,
     turn(g, pid, o) {
-      return new Promise(resolve => { pending = { kind: 'turn', o, resolve }; selected = -1; refresh(); });
+      return new Promise(resolve => {
+        pending = { kind: 'turn', o, resolve };
+        selected = -1;
+        analysis = MJ.ai.analyze(g, 0);
+        refresh();
+      });
     },
     claim(g, pid, o, t, from) {
       return new Promise(resolve => { pending = { kind: 'claim', o, tile: t, from, resolve }; refresh(); });
@@ -117,6 +170,7 @@
     const p = pending;
     pending = null;
     selected = -1;
+    analysis = null;
     refresh();
     p.resolve(act);
   }
@@ -134,10 +188,6 @@
     if (idx === selected) answer({ type: 'discard', tile: game.players[0].hand[idx] });
     else { selected = idx; refresh(); }
   };
-  $('#mute').addEventListener('click', () => {
-    S.muted = !S.muted;
-    $('#mute').textContent = S.muted ? '音效：關' : '音效：開';
-  });
 
   const ui = {
     async emit(type, d) {
@@ -152,9 +202,13 @@
       if (win) S.reveal = { pid: d.pid, ron: d.text === '胡', from: game.lastDiscard ? game.lastDiscard.from : -1 };
       refresh();
       if (type === 'call' || type === 'flower') shout(d.pid, d.text);
-      if (win) { S.celebrate(d.pid); await sleep(2600); }
-      // 自己摸牌不必等
-      else if (!(type === 'draw' && d.pid === 0)) await sleep(DELAY[type]);
+      if (type === 'call') S.say(d.text);
+      if (win) { S.celebrate(d.pid); await sleep(prefs.reduced ? 1500 : 3200); }
+      else {
+        if (type === 'call') S.focus(d.pid, 1000);
+        // 自己摸牌不必等
+        if (!(type === 'draw' && d.pid === 0)) await sleep(DELAY[type] * (prefs.reduced ? 0.6 : 1));
+      }
       $('#shout').hidden = true;
     },
   };
@@ -168,6 +222,8 @@
     if (first) first.focus();
     return new Promise(resolve => {
       ov.onclick = e => {
+        // 先收起對話框看牌桌，按「回到結算」再回來
+        if (e.target.closest('[data-peek]')) { ov.hidden = true; $('#back').hidden = false; return; }
         const b = e.target.closest('button[data-v]');
         if (!b) return;
         ov.hidden = true;
@@ -176,15 +232,37 @@
       };
     });
   }
+  $('#back').addEventListener('click', () => { $('#back').hidden = true; $('#overlay').hidden = false; });
+
+  // 胡牌後在桌上一條一條數台
+  async function showTai(r) {
+    const box = $('#tai'), w = game.players[r.winner];
+    box.innerHTML = `<h2>${w.name}${r.zimo ? '自摸' : '胡牌'}</h2><table></table>`;
+    box.hidden = false;
+    const table = box.querySelector('table');
+    let sum = 0;
+    for (const it of r.items) {
+      await sleep(430);
+      sum += it.tai;
+      table.insertAdjacentHTML('beforeend', `<tr><td>${it.name}</td><td class="n">${it.tai} 台</td></tr>`);
+      S.tick();
+    }
+    await sleep(500);
+    table.insertAdjacentHTML('beforeend', `<tr class="sum"><td>合計</td><td class="n">${sum} 台</td></tr>`);
+    S.tick();
+    await sleep(1300);
+    box.hidden = true;
+  }
 
   const deltaRows = deltas => game.players.map((p, i) =>
     `<tr><td>${p.name}</td><td class="n ${deltas[i] > 0 ? 'plus' : deltas[i] < 0 ? 'minus' : ''}">${signed(deltas[i])}</td>` +
     `<td class="n">${signed(p.score)}</td></tr>`).join('');
 
   function showResult(r) {
-    const next = '<div class="btns"><button class="btn win" data-v="next">下一局</button></div>';
+    const btns = '<div class="btns"><button class="btn win" data-v="next">下一局</button>' +
+      '<button class="btn" data-peek>看牌桌</button></div>';
     if (r.type === 'draw') {
-      return dialog(`<h1>流局</h1><p>牌摸完了，沒有人胡牌。莊家連莊。</p>${next}`);
+      return dialog(`<h1>流局</h1><p>牌摸完了，沒有人胡牌。莊家連莊。四家的手牌都攤在桌上了。</p>${btns}`);
     }
     const P = game.players, w = P[r.winner];
     const concealed = w.hand.slice();
@@ -202,7 +280,7 @@
       `<h1>${title}</h1>${handHtml}` +
       `<div class="cols"><div><table>${items}<tr class="sum"><td>合計</td><td class="n">${r.tai} 台</td></tr></table>${extra}</div>` +
       `<table><tr><td></td><td class="n">這局</td><td class="n">累計</td></tr>${deltaRows(r.deltas)}</table></div>` +
-      `<p>每家付 底 ${game.base} ＋ 台數 × ${game.taiValue}。</p>${next}`);
+      `<p>每家付 底 ${game.base} ＋ 台數 × ${game.taiValue}。</p>${btns}`);
   }
 
   function showStart(extra, lan) {
@@ -230,7 +308,15 @@
     while (!game.over) {
       const r = await game.playHand();
       refresh();
+      if (r.type === 'win' && !prefs.reduced) await showTai(r);
+      // 結算前把四家的手牌都攤開
+      S.revealAll = true;
+      S.rest();
+      S.pay(r.deltas);
+      refresh();
+      await sleep(r.type === 'draw' ? 1600 : 900);
       await showResult(r);
+      $('#back').hidden = true;
       game.advance(r);
     }
     return rankHtml() + '<p>&nbsp;</p>';
@@ -298,9 +384,12 @@
           if (pending && pending.seq === m.seq) { pending = null; selected = -1; refresh(); }
         } else if (m.t === 'result') {
           show(m.state);
+          S.rest();
+          S.pay(m.r.deltas);
           refresh();
           // 不擋住後面的訊息：主機等太久會直接發下一局
-          showResult(m.r).then(() => { MJ.net.send({ t: 'next' }); sheet('<p>等其他人按下一局…</p>'); });
+          showResult(m.r).then(() => {
+            $('#back').hidden = true; MJ.net.send({ t: 'next' }); sheet('<p>等其他人按下一局…</p>'); });
         } else if (m.t === 'over') {
           show(m.state);
           refresh();
@@ -324,6 +413,7 @@
 
   async function main() {
     S.init($('#stage'));
+    applyPrefs();
     const lan = await MJ.net.available();
     let extra = '';
     for (;;) {

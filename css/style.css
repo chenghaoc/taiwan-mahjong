@@ -26,6 +26,22 @@ body {
 #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 [hidden] { display: none !important; }
 
+/* ---- 鏡頭感：遠處與最近處微微失焦，四角壓暗 ---- */
+#lens, #lens i { position: fixed; inset: 0; pointer-events: none; }
+#lens .far {
+  bottom: auto; height: 17vh;
+  backdrop-filter: blur(2.5px); -webkit-backdrop-filter: blur(2.5px);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 22%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 22%, transparent 100%);
+}
+#lens .near {
+  top: auto; height: 7vh;
+  backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+  mask-image: linear-gradient(to top, #000 0%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to top, #000 0%, transparent 100%);
+}
+#lens .vignette { background: radial-gradient(ellipse at 50% 50%, transparent 58%, rgba(0, 0, 0, 0.5) 100%); }
+
 /* ---- 疊在牌桌上的介面：只有按鈕接收點擊 ---- */
 #hud { position: fixed; inset: 0; pointer-events: none; }
 #hud button { pointer-events: auto; }
@@ -91,7 +107,41 @@ body {
   background: var(--panel);
   white-space: nowrap;
 }
-#mute { position: absolute; right: 1.5vw; top: 1.5vh; min-height: 0; font-family: var(--sans); font-size: calc(var(--u) * 1.3); font-weight: 400; }
+#toggles { position: absolute; right: 1vw; top: 1.2vh; display: flex; }
+#toggles .btn { min-height: 0; padding: calc(var(--u) * 0.4) calc(var(--u) * 0.8); font-family: var(--sans); font-size: calc(var(--u) * 1.3); font-weight: 400; }
+#back { position: absolute; left: 50%; top: 9vh; transform: translateX(-50%); }
+
+/* 手牌上方的進張數 */
+.tip {
+  position: absolute; transform: translate(-50%, -100%);
+  min-width: calc(var(--u) * 2.2);
+  padding: 0 calc(var(--u) * 0.4);
+  border-radius: calc(var(--u) * 1);
+  background: var(--panel);
+  text-align: center; font-variant-numeric: tabular-nums; font-size: calc(var(--u) * 1.3);
+}
+.tip.best { background: var(--gold); color: var(--ink); font-weight: 700; }
+.dim { opacity: 0.6; }
+#hint small { margin-right: calc(var(--u) * 0.5); opacity: 0.8; }
+.tile.dead { filter: grayscale(1) brightness(0.6); }
+
+/* 胡牌後數台 */
+#tai {
+  position: absolute; left: 50%; top: 30vh; transform: translateX(-50%);
+  min-width: calc(var(--u) * 26);
+  padding: calc(var(--u) * 1.4) calc(var(--u) * 2.4);
+  border-radius: calc(var(--u) * 1.4);
+  background: rgba(8, 26, 25, 0.86);
+  box-shadow: 0 calc(var(--u) * 0.6) calc(var(--u) * 2.4) rgba(0, 0, 0, 0.5);
+  font-size: calc(var(--u) * 2);
+}
+#tai h2 { margin: 0 0 calc(var(--u) * 0.6); font-family: var(--kai); font-size: calc(var(--u) * 3.2); color: var(--gold); }
+#tai table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+#tai td { padding: calc(var(--u) * 0.25) 0; }
+#tai td.n { text-align: right; }
+#tai tr { animation: line 0.25s ease-out; }
+#tai tr.sum td { border-top: 1px solid var(--ivory); font-weight: 700; font-size: calc(var(--u) * 2.6); color: var(--gold); }
+@keyframes line { from { transform: translateX(calc(var(--u) * -2)); opacity: 0; } }
 
 /* ---- 平面的牌（按鈕、提示、結算用）---- */
 .tile {
@@ -172,5 +222,5 @@ body {
 .minus { color: var(--red); font-weight: 700; }
 
 @media (prefers-reduced-motion: reduce) {
-  #shout { animation: none; }
+  #shout, #tai tr { animation: none; }
 }

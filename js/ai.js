@@ -18,31 +18,36 @@
     return u;
   }
 
-  function chooseDiscard(game, pid) {
+  // 手上每種牌打掉之後：s 向聽數、uke 有效進張的剩餘張數
+  function analyze(game, pid) {
     const p = game.players[pid], need = 5 - p.melds.length;
     const c = MJ.toCounts(p.hand), u = unseen(game, pid);
-    const cands = [];
-    let min = 99;
+    const out = [];
     for (let k = 0; k < 34; k++) {
       if (!c[k]) continue;
       c[k]--;
       const s = MJ.shanten(c, need);
-      c[k]++;
-      cands.push({ k, s });
-      if (s < min) min = s;
-    }
-    let best = null;
-    for (const cd of cands) {
-      if (cd.s !== min) continue;
-      c[cd.k]--;
       let uke = 0;
       for (let j = 0; j < 34; j++) {
         if (u[j] <= 0) continue;
         c[j]++;
-        if (MJ.shanten(c, need) < min) uke += u[j];
+        if (MJ.shanten(c, need) < s) uke += u[j];
         c[j]--;
       }
-      c[cd.k]++;
+      c[k]++;
+      out.push({ k, s, uke });
+    }
+    return out;
+  }
+
+  function chooseDiscard(game, pid) {
+    const c = MJ.toCounts(game.players[pid].hand), u = unseen(game, pid);
+    const cands = analyze(game, pid);
+    const min = Math.min(...cands.map(cd => cd.s));
+    let best = null;
+    for (const cd of cands) {
+      if (cd.s !== min) continue;
+      const uke = cd.uke;
       // 進張相同時：先丟孤張字牌、么九，其次是別人打過的牌
       let pref = 0;
       const k = cd.k;
@@ -60,6 +65,7 @@
 
   MJ.ai = {
     unseen,
+    analyze,
     turn(game, pid, o) {
       if (o.hu) return { type: 'hu' };
       const p = game.players[pid], need = 5 - p.melds.length;

@@ -1,13 +1,17 @@
 // three.js 牌桌：144 張實體牌，依牌局狀態決定每張的位置，移動時補上動畫
 (function () {
   'use strict';
-  const MJ = window.MJ, T = window.THREE;
-  const S = MJ.scene = { reveal: null, mark: false, pickable: false, selected: -1, muted: false, idle: true };
+  const MJ = window.MJ, T = window.THREE, C = window.CANNON;
+  const S = MJ.scene = {
+    reveal: null, revealAll: false, mark: false, pickable: false, selected: -1,
+    muted: false, reduced: false, idle: true, wallOffset: 0, seed: 1,
+  };
 
   // 牌的尺寸與桌面配置（單位：牌寬 3）
-  const W = 3, H = 4, D = 1.9, PITCH = 3.12, BEVEL = 0.12;
-  const HALF = 52, EDGE = 41, ROW = 44, WALL_Z = 32, POOL_Z = 11.5, POOL_COLS = 7, LEAN = 0.62, MY_SCALE = 1.3;
-  const X = new T.Vector3(1, 0, 0), Y = new T.Vector3(0, 1, 0);
+  const W = 3, H = 4, D = 1.9, PITCH = 3.12, LONG = H + 0.15, BEVEL = 0.12;
+  const HALF = 52, EDGE = 41, ROW = 44, WALL_Z = 32, POOL_Z = 11.5, LEAN = 0.62, MY_SCALE = 1.3;
+  const WALL_SIDES = [0, 3, 2, 1];         // 牌牆順時針繞桌一圈
+  const X = new T.Vector3(1, 0, 0), Y = new T.Vector3(0, 1, 0), Z = new T.Vector3(0, 0, 1);
   const rotX = a => new T.Quaternion().setFromAxisAngle(X, a);
   const Q_STAND = new T.Quaternion();      // 立著，牌面朝自己
   const Q_LEAN = rotX(-LEAN);              // 我的手牌：往後靠，牌面朝鏡頭
@@ -19,14 +23,25 @@
     pos: new T.Vector3(x, y, z).applyQuaternion(seatQ[pid]),
     quat: seatQ[pid].clone().multiply(q),
   });
+  // 亮出來的牌不跟著座位轉，字頭一律朝遠方，坐在我這邊看都是正的。
+  // 左右兩家的牌因此是「橫著排」：沿桌邊的間距用牌高，往桌心的間距用牌寬。
+  const flat = (pid, x, z, down) => ({
+    pos: new T.Vector3(x, D / 2, z).applyQuaternion(seatQ[pid]),
+    quat: down ? Q_DOWN : Q_UP,
+  });
+  const along = pid => (pid % 2 ? LONG : PITCH);
+  const deep = pid => (pid % 2 ? PITCH : LONG);
+  // 沿桌邊排列時，哪個方向對我來說是「由左到右／由遠到近」
+  const order = pid => (pid === 1 || pid === 2 ? -1 : 1);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  let renderer, scene, camera, game = null;
-  const tiles = [], byKind = [];
+  let renderer, scene, camera, world, game = null;
+  const IVORY = 0xece4cf;
+  const tiles = [], byKind = [], dice = [];
   const raycaster = new T.Raycaster(), mouse = new T.Vector2();
-  let hover = -1, marker, plate, plateCtx, plateTex, sparks, sparkVel = [], sparkLife = 0;
-  const rings = [];
-  const cam = { yaw: 0, zoom: 1, yawTo: 0, zoomTo: 1, fit: 1 };
+  let hover = -1, marker, plateCtx, plateTex, sparks, sparkLife = 0;
+  const sparkVel = [], rings = [];
+  const cam = { yaw: 0, zoom: 1, yawTo: 0, zoomTo: 1, fit: 1, shake: 0 };
 
   // ---- 建立場景 ----
   function roundedRect(w, h, r) {
@@ -39,31 +54,521 @@
     return s;
   }
 
-  function faceTexture(kind) {
+  // 牌面：顏色貼圖（象牙底 + 上色的圖案）與法線貼圖（圖案往下刻進去，邊緣會吃光）
+  function faceTextures(kind) {
+    const w = 240, h = 320;
+    const c = document.createElement('canvas'), nc = document.createElement('canvas');
+    c.width = nc.width = w; c.height = nc.height = h;
+    const ctx = c.getContext('2d'), nctx = nc.getContext('2d');
+    const ivory = '#' + IVORY.toString(16);
+    ctx.fillStyle = ivory; ctx.fillRect(0, 0, w, h);
+    nctx.fillStyle = '#8080ff'; nctx.fillRect(0, 0, w, h);
+    const map = new T.CanvasTexture(c), normal = new T.CanvasTexture(nc);
+    map.anisotropy = normal.anisotropy = 8;
+    const img = new Image();
+    img.onload = () => {
+      const g = document.createElement('canvas');
+      g.width = w; g.height = h;
+      const gx = g.getContext('2d');
+      gx.drawImage(img, 0, 0, w, h);
+      const src = gx.getImageData(0, 0, w, h).data;
+      // 深度 = 圖案的不透明度，先糊開讓刻痕有斜面
+      let a = new Float32Array(w * h), b = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) a[i] = src[i * 4 + 3] / 255;
+      for (let pass = 0; pass < 2; pass++) {
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          let sum = 0;
+          for (let d = -2; d <= 2; d++) sum += a[y * w + Math.min(w - 1, Math.max(0, x + d))];
+          b[y * w + x] = sum / 5;
+        }
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          let sum = 0;
+          for (let d = -2; d <= 2; d++) sum += b[Math.min(h - 1, Math.max(0, y + d)) * w + x];
+          a[y * w + x] = sum / 5;
+        }
+      }
+      const out = nctx.createImageData(w, h), K = 3.2;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const dx = a[y * w + Math.min(w - 1, x + 1)] - a[y * w + Math.max(0, x - 1)];
+        const dy = a[Math.min(h - 1, y + 1) * w + x] - a[Math.max(0, y - 1) * w + x];
+        const nx = K * dx, ny = -K * dy, len = Math.hypot(nx, ny, 1), i = (y * w + x) * 4;
+        out.data[i] = (nx / len * 0.5 + 0.5) * 255;
+        out.data[i + 1] = (ny / len * 0.5 + 0.5) * 255;
+        out.data[i + 2] = (1 / len * 0.5 + 0.5) * 255;
+        out.data[i + 3] = 255;
+      }
+      nctx.putImageData(out, 0, 0);
+      // 刻痕上緣壓一道暗影，再疊上顏料
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.filter = 'blur(1.5px)';
+      ctx.drawImage(g, 0, -2.5);
+      ctx.restore();
+      ctx.drawImage(g, 0, 0);
+      map.needsUpdate = normal.needsUpdate = true;
+    };
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(MJ.face(kind));
+    return { map, normal };
+  }
+
+  // ---- 房間：地板、地毯、桌腳、椅子、吊燈的光 ----
+  function buildRoom(wood) {
+    const FLOOR = -70;
+    const pc = document.createElement('canvas');
+    pc.width = pc.height = 512;
+    const px = pc.getContext('2d');
+    px.fillStyle = '#4a321f'; px.fillRect(0, 0, 512, 512);
+    for (let col = 0; col < 8; col++) {
+      let y = -rnd(0, 200);
+      while (y < 512) {
+        const len = rnd(140, 300), shade = rnd(-18, 18);
+        px.fillStyle = 'rgb(' + (74 + shade) + ',' + (50 + shade * 0.7) + ',' + (31 + shade * 0.5) + ')';
+        px.fillRect(col * 64 + 1, y + 1, 62, len - 2);
+        for (let i = 0; i < 7; i++) {
+          px.strokeStyle = 'rgba(25, 12, 4, ' + rnd(0.1, 0.3) + ')';
+          px.beginPath(); px.moveTo(col * 64 + rnd(4, 60), y); px.lineTo(col * 64 + rnd(4, 60), y + len); px.stroke();
+        }
+        y += len;
+      }
+    }
+    const planks = new T.CanvasTexture(pc);
+    planks.wrapS = planks.wrapT = T.RepeatWrapping;
+    planks.repeat.set(7, 7);
+    planks.anisotropy = 8;
+    const floor = new T.Mesh(new T.PlaneGeometry(900, 900), new T.MeshStandardMaterial({ map: planks, roughness: 0.6, envMapIntensity: 0.35 }));
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = FLOOR;
+    scene.add(floor);
+
+    // 地毯：深紅底、金色雙框
+    const rc = document.createElement('canvas');
+    rc.width = rc.height = 512;
+    const rx = rc.getContext('2d');
+    rx.fillStyle = '#5b1f1c'; rx.fillRect(0, 0, 512, 512);
+    rx.strokeStyle = '#b08a4a'; rx.lineWidth = 6; rx.strokeRect(22, 22, 468, 468);
+    rx.lineWidth = 2; rx.strokeRect(40, 40, 432, 432);
+    rx.strokeStyle = 'rgba(176, 138, 74, 0.35)';
+    for (let i = 70; i < 450; i += 38) for (let j = 70; j < 450; j += 38) {
+      rx.beginPath(); rx.moveTo(i, j - 9); rx.lineTo(i + 9, j); rx.lineTo(i, j + 9); rx.lineTo(i - 9, j); rx.closePath(); rx.stroke();
+    }
+    rx.globalCompositeOperation = 'overlay'; rx.globalAlpha = 0.5;
+    rx.fillStyle = noisePattern(rx, 128, 60, 190); rx.fillRect(0, 0, 512, 512);
+    const rug = new T.Mesh(new T.PlaneGeometry(250, 250), new T.MeshStandardMaterial({ map: new T.CanvasTexture(rc), roughness: 1, envMapIntensity: 0.15 }));
+    rug.rotation.x = -Math.PI / 2;
+    rug.position.y = FLOOR + 0.2;
+    scene.add(rug);
+    // 桌子底下的暗影
+    const sc = document.createElement('canvas');
+    sc.width = sc.height = 128;
+    const sx = sc.getContext('2d'), sg = sx.createRadialGradient(64, 64, 20, 64, 64, 64);
+    sg.addColorStop(0, 'rgba(0,0,0,0.75)'); sg.addColorStop(1, 'rgba(0,0,0,0)');
+    sx.fillStyle = sg; sx.fillRect(0, 0, 128, 128);
+    const under = new T.Mesh(new T.PlaneGeometry(190, 190), new T.MeshBasicMaterial({ map: new T.CanvasTexture(sc), transparent: true, depthWrite: false }));
+    under.rotation.x = -Math.PI / 2;
+    under.position.y = FLOOR + 0.4;
+    scene.add(under);
+
+    // 桌身與桌腳
+    const dark = new T.MeshStandardMaterial({ color: 0x3a2413, roughness: 0.55, envMapIntensity: 0.4 });
+    const apron = new T.Mesh(new T.BoxGeometry(HALF * 2 + 7, 7, HALF * 2 + 7), dark);
+    apron.position.y = -4.4;
+    scene.add(apron);
+    for (const [sx2, sz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const leg = new T.Mesh(new T.BoxGeometry(6, 63, 6), dark);
+      leg.position.set(sx2 * (HALF - 3), FLOOR + 31.5, sz * (HALF - 3));
+      scene.add(leg);
+    }
+    // 三位對手的椅子
+    for (let pid = 1; pid < 4; pid++) {
+      const chair = new T.Group();
+      const part = (w, h, d, x, y, z) => {
+        const m = new T.Mesh(new T.BoxGeometry(w, h, d), wood);
+        m.position.set(x, y, z);
+        chair.add(m);
+      };
+      part(36, 3, 34, 0, -30, 0);
+      part(36, 46, 3, 0, -8.5, 17);
+      for (const [lx, lz] of [[-16, -15], [16, -15], [-16, 15], [16, 15]]) part(3, 40, 3, lx, -50, lz);
+      chair.position.copy(new T.Vector3(0, 0, HALF + 30).applyQuaternion(seatQ[pid]));
+      chair.quaternion.copy(seatQ[pid]);
+      scene.add(chair);
+    }
+    // 桌子正上方的吊燈：一圈暖光打在桌面與地板
+    const lamp = new T.SpotLight(0xffdfae, 0.55, 520, 0.72, 0.9, 1);
+    lamp.position.set(0, 190, 0);
+    scene.add(lamp, lamp.target);
+    scene.fog = new T.Fog(0x0b1413, 190, 520);
+  }
+
+  // ---- 物理：骰子與打出去的牌 ----
+  const G_GROUND = 1, G_DICE = 2, G_FENCE = 4, G_TILE = 8;
+  let tileShape;
+  function buildPhysics() {
+    world = new C.World();
+    world.gravity.set(0, -260, 0);
+    world.allowSleep = true;
+    world.defaultContactMaterial.friction = 0.35;
+    world.defaultContactMaterial.restitution = 0.3;
+    const plane = (group, mask, axis, angle, x, y, z) => {
+      const b = new C.Body({ mass: 0, shape: new C.Plane(), collisionFilterGroup: group, collisionFilterMask: mask });
+      b.quaternion.setFromAxisAngle(axis, angle);
+      b.position.set(x, y, z);
+      world.addBody(b);
+    };
+    plane(G_GROUND, G_DICE | G_TILE, new C.Vec3(1, 0, 0), -Math.PI / 2, 0, 0, 0);
+    // 骰子只在桌子中央滾，四面看不見的擋板圍住
+    const up = new C.Vec3(0, 1, 0), F = 13;
+    plane(G_FENCE, G_DICE, up, -Math.PI / 2, F, 0, 0);
+    plane(G_FENCE, G_DICE, up, Math.PI / 2, -F, 0, 0);
+    plane(G_FENCE, G_DICE, up, Math.PI, 0, 0, F);
+    plane(G_FENCE, G_DICE, up, 0, 0, 0, -F);
+    tileShape = new C.Box(new C.Vec3(W / 2, H / 2, D / 2));
+  }
+
+  // 把一張牌交給物理引擎丟向它的位置；落定後再由動畫推正
+  function launch(t, now) {
+    const g = t.g, b = new C.Body({ mass: 1, shape: tileShape, collisionFilterGroup: G_TILE, collisionFilterMask: G_GROUND });
+    b.position.set(g.position.x, g.position.y, g.position.z);
+    b.quaternion.set(g.quaternion.x, g.quaternion.y, g.quaternion.z, g.quaternion.w);
+    b.linearDamping = 0.15; b.angularDamping = 0.35;
+    // 落點抓在目標前面一點，留一段滑行
+    const dx = t.pos.x - g.position.x, dz = t.pos.z - g.position.z, len = Math.hypot(dx, dz) || 1, tf = 0.42;
+    const tx = t.pos.x - dx / len * 1.6, tz = t.pos.z - dz / len * 1.6;
+    b.velocity.set((tx - g.position.x) / tf, (1.2 - g.position.y) / tf + 0.5 * 260 * tf, (tz - g.position.z) / tf);
+    const flip = new T.Vector3(1, 0, 0).applyQuaternion(g.quaternion).multiplyScalar(rnd(8, 13) * (Math.random() < 0.5 ? -1 : 1));
+    b.angularVelocity.set(flip.x + rnd(-2, 2), flip.y + rnd(-3, 3), flip.z + rnd(-2, 2));
+    const p = t.phys = { b, until: now + tf * 1000 + 420, hit: false };
+    b.addEventListener('collide', () => {
+      if (p.hit) return;
+      p.hit = true;
+      ring(b.position);
+      sfx('discard', 0.9, () => clack(0.9));
+    });
+    world.addBody(b);
+    t.tw = null;
+  }
+  function endPhys(t) {
+    world.removeBody(t.phys.b);
+    t.phys = null;
+  }
+
+  // ---- 桌上的小東西：籌碼、莊家牌、茶杯 ----
+  const props = [], stacks = [[], [], [], []];
+  let dealerBlock;
+  // 讓道具沿拋物線飛到定點
+  function fly(obj, to, o) {
+    const k = S.reduced ? 0.4 : 1;
+    props.push({ obj, p0: obj.position.clone(), p1: to.clone(), t0: performance.now() + (o.delay || 0) * k, dur: o.dur * k, arc: (o.arc || 0) * k, done: o.done });
+  }
+  const dealerSpot = pid => place(pid, -32.5, 0.7, 38, Q_STAND).pos;
+  function buildProps() {
+    const chipGeo = new T.CylinderGeometry(1.1, 1.1, 0.28, 28);
+    const colors = [0xb8322b, 0x23508f, 0xe9e2cf, 0x1f7a4d];
+    const chipMats = colors.map(c => new T.MeshStandardMaterial({ color: c, roughness: 0.45, envMapIntensity: 0.6 }));
+    for (let pid = 0; pid < 4; pid++) for (let i = 0; i < 15; i++) {
+      const chip = new T.Mesh(chipGeo, chipMats[Math.floor(i / 5 + pid) % 4]);
+      chip.castShadow = chip.receiveShadow = true;
+      scene.add(chip);
+      stacks[pid].push(chip);
+    }
+    layoutChips(false);
+
+    const dc = document.createElement('canvas');
+    dc.width = dc.height = 128;
+    const dx = dc.getContext('2d');
+    dx.fillStyle = '#a3261f'; dx.fillRect(0, 0, 128, 128);
+    dx.strokeStyle = '#e3c06a'; dx.lineWidth = 6; dx.strokeRect(9, 9, 110, 110);
+    dx.fillStyle = '#f1d98a'; dx.textAlign = 'center'; dx.textBaseline = 'middle';
+    dx.font = '700 84px "DFKai-SB", "BiauKai", "KaiTi", serif';
+    dx.fillText('莊', 64, 68);
+    const side = new T.MeshStandardMaterial({ color: 0x8a1f1a, roughness: 0.4, envMapIntensity: 0.5 });
+    const top = new T.MeshStandardMaterial({ map: new T.CanvasTexture(dc), roughness: 0.4, envMapIntensity: 0.5 });
+    dealerBlock = new T.Mesh(new T.BoxGeometry(3.4, 1.4, 3.4), [side, side, top, side, side, side]);
+    dealerBlock.castShadow = true;
+    dealerBlock.position.copy(dealerSpot(0));
+    scene.add(dealerBlock);
+
+    const china = new T.MeshStandardMaterial({ color: 0xf2efe6, roughness: 0.25, side: T.DoubleSide, envMapIntensity: 0.8 });
+    const tea = new T.MeshStandardMaterial({ color: 0x8a5a1e, roughness: 0.15, envMapIntensity: 1 });
+    for (let pid = 0; pid < 4; pid++) {
+      const cup = new T.Group();
+      const saucer = new T.Mesh(new T.CylinderGeometry(2.1, 1.5, 0.3, 32), china);
+      saucer.position.y = 0.15;
+      const wall = new T.Mesh(new T.CylinderGeometry(1.35, 1.0, 1.7, 32, 1, true), china);
+      wall.position.y = 1.15;
+      const base = new T.Mesh(new T.CircleGeometry(1.0, 32), china);
+      base.rotation.x = -Math.PI / 2; base.position.y = 0.32;
+      const liquid = new T.Mesh(new T.CircleGeometry(1.22, 32), tea);
+      liquid.rotation.x = -Math.PI / 2; liquid.position.y = 1.62;
+      cup.add(saucer, wall, base, liquid);
+      cup.traverse(m => { m.castShadow = true; });
+      cup.position.copy(place(pid, -38.5, 0, 38, Q_STAND).pos);
+      scene.add(cup);
+    }
+  }
+  // 每家的籌碼八枚一疊，疊滿往旁邊排
+  function layoutChips(animate) {
+    let moved = 0;
+    stacks.forEach((list, pid) => list.forEach((chip, j) => {
+      const col = Math.floor(j / 8);
+      const to = place(pid, -39.5 + (col % 4) * 2.5, 0.15 + (j % 8) * 0.3, 31 + Math.floor(col / 4) * 2.5, Q_STAND).pos;
+      if (chip.position.distanceTo(to) < 0.01) return;
+      if (animate) fly(chip, to, { dur: 520, arc: 9, delay: moved++ * 80, done: () => tone(rnd(2300, 2900), 0.07, 0.12, 'triangle') });
+      else chip.position.copy(to);
+    }));
+  }
+  // 結算：輸家每 100 分推一枚籌碼給贏家（最多六枚）
+  S.pay = deltas => {
+    const winner = deltas.findIndex(d => d > 0);
+    if (winner < 0) return;
+    deltas.forEach((d, pid) => {
+      if (d >= 0) return;
+      for (let k = Math.max(1, Math.min(6, Math.round(-d / 100))); k > 0 && stacks[pid].length; k--) stacks[winner].push(stacks[pid].pop());
+    });
+    layoutChips(true);
+  };
+
+  // 每局換一組的固定亂數：同一個位置每次算出來都一樣，牌才不會自己亂動
+  const jrand = k => { const x = Math.sin(k * 127.1 + S.seed * 311.7) * 43758.5453; return (x - Math.floor(x)) * 2 - 1; };
+  // 手擺的牌不會完全對齊：位置與角度各偏一點
+  function jit(pl, key, posAmp, rotAmp) {
+    return {
+      pos: new T.Vector3(pl.pos.x + jrand(key) * posAmp, pl.pos.y, pl.pos.z + jrand(key + 0.37) * posAmp),
+      quat: new T.Quaternion().setFromAxisAngle(Y, jrand(key + 0.71) * rotAmp).multiply(pl.quat),
+    };
+  }
+
+  const rnd = (a, b) => a + Math.random() * (b - a);
+
+  // 一小塊灰階雜訊，拿來當重複花紋疊在大貼圖上
+  function noisePattern(ctx, size, lo, hi) {
     const c = document.createElement('canvas');
-    c.width = 240; c.height = 320;
+    c.width = c.height = size;
+    const x = c.getContext('2d'), img = x.createImageData(size, size);
+    for (let i = 0; i < img.data.length; i += 4) {
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = rnd(lo, hi);
+      img.data[i + 3] = 255;
+    }
+    x.putImageData(img, 0, 0);
+    return ctx.createPattern(c, 'repeat');
+  }
+
+  // 整張桌布一張貼圖（不重複）：絨布顆粒、印花邊框、洗牌磨痕、刮痕、茶漬
+  function feltTexture() {
+    const N = 2048, U = N / (HALF * 2), mid = N / 2;   // U：桌面一單位幾個像素
+    const c = document.createElement('canvas');
+    c.width = c.height = N;
+    const ctx = c.getContext('2d');
+
+    // 底色：中間亮、四周暗
+    const base = ctx.createRadialGradient(mid, mid * 0.92, N * 0.08, mid, mid, N * 0.75);
+    base.addColorStop(0, '#2b6e64');
+    base.addColorStop(0.55, '#225c54');
+    base.addColorStop(1, '#173f3a');
+    ctx.fillStyle = base;
+    ctx.fillRect(0, 0, N, N);
+
+    // 斜紋織線
+    ctx.lineWidth = 1;
+    for (let i = -N; i < N; i += 7) {
+      ctx.strokeStyle = `rgba(255,255,255,${rnd(0.012, 0.03)})`;
+      ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + N, N); ctx.stroke();
+      ctx.strokeStyle = `rgba(0,0,0,${rnd(0.015, 0.035)})`;
+      ctx.beginPath(); ctx.moveTo(i + N + 3, 0); ctx.lineTo(i + 3, N); ctx.stroke();
+    }
+
+    // 印花：雙線邊框、回紋角、中央一圈細線
+    const gold = a => `rgba(214, 190, 128, ${a})`;
+    const inset = 5.5 * U;
+    ctx.strokeStyle = gold(0.34);
+    ctx.lineWidth = 5;
+    ctx.strokeRect(inset, inset, N - inset * 2, N - inset * 2);
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(inset + 12, inset + 12, N - (inset + 12) * 2, N - (inset + 12) * 2);
+    // 回紋：方形螺旋，四個角各一個
+    const key = (x, y, s, fx, fy) => {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(fx, fy);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      for (const [px, py] of [[6, 0], [6, 6], [1, 6], [1, 2], [4, 2], [4, 4], [2.6, 4]]) ctx.lineTo(px * s, py * s);
+      ctx.stroke();
+      ctx.restore();
+    };
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = gold(0.3);
+    const ko = inset + 30, ks = 13;
+    key(ko, ko, ks, 1, 1); key(N - ko, ko, ks, -1, 1); key(ko, N - ko, ks, 1, -1); key(N - ko, N - ko, ks, -1, -1);
+    // 各家面前的出牌區記號
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = gold(0.16);
+    ctx.strokeRect(mid - 29.5 * U, mid - 29.5 * U, 59 * U, 59 * U);
+    ctx.beginPath(); ctx.arc(mid, mid, 15.5 * U, 0, Math.PI * 2); ctx.stroke();
+
+    // 洗牌磨出來的亮面：中央一大片，加上一圈圈弧形擦痕
+    const soft = (x, y, rx, ry, color) => {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(rx, ry);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+      g.addColorStop(0, color);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    };
+    soft(mid, mid, 30 * U, 30 * U, 'rgba(190, 225, 205, 0.11)');
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 260; i++) {
+      const r = rnd(5, 30) * U, a = rnd(0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(220, 240, 228, ${rnd(0.015, 0.05)})`;
+      ctx.lineWidth = rnd(1, 5);
+      ctx.beginPath();
+      ctx.arc(mid + rnd(-4, 4) * U, mid + rnd(-4, 4) * U, r, a, a + rnd(0.15, 0.9));
+      ctx.stroke();
+    }
+    // 四家手牌位置磨亮的長條，以及手肘靠的桌邊磨暗
+    for (let p = 0; p < 4; p++) {
+      const v = new T.Vector3(0, 0, ROW - 2).applyQuaternion(seatQ[p]);
+      const along = p % 2 ? [4.5 * U, 34 * U] : [34 * U, 4.5 * U];
+      soft(mid + v.x * U, mid + v.z * U, along[0], along[1], 'rgba(200, 230, 212, 0.13)');
+      const e = new T.Vector3(0, 0, HALF - 1).applyQuaternion(seatQ[p]);
+      soft(mid + e.x * U, mid + e.z * U, along[0] * 1.2, along[1] * 1.2, 'rgba(0, 0, 0, 0.16)');
+    }
+
+    // 刮痕：多數又短又淡，少數幾道長的
+    for (let i = 0; i < 150; i++) {
+      const long = i < 9;
+      const x = rnd(0, N), y = rnd(0, N), a = rnd(0, Math.PI * 2), len = long ? rnd(120, 420) : rnd(8, 60);
+      const bend = rnd(-0.25, 0.25) * len;
+      ctx.strokeStyle = Math.random() < 0.75
+        ? `rgba(225, 240, 230, ${long ? rnd(0.1, 0.2) : rnd(0.07, 0.22)})`
+        : `rgba(0, 0, 0, ${rnd(0.08, 0.2)})`;
+      ctx.lineWidth = long ? rnd(0.8, 1.6) : rnd(0.6, 2.2);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.quadraticCurveTo(
+        x + Math.cos(a) * len / 2 - Math.sin(a) * bend, y + Math.sin(a) * len / 2 + Math.cos(a) * bend,
+        x + Math.cos(a) * len, y + Math.sin(a) * len);
+      ctx.stroke();
+    }
+
+    // 茶杯印與幾處污漬
+    const ring = (x, y, r) => {
+      ctx.strokeStyle = 'rgba(8, 26, 22, 0.22)';
+      ctx.lineWidth = rnd(3, 5);
+      ctx.beginPath(); ctx.arc(x, y, r, rnd(0, 1), rnd(4.6, 6.2)); ctx.stroke();
+      soft(x, y, r, r, 'rgba(8, 26, 22, 0.07)');
+    };
+    for (let p = 0; p < 4; p++) {
+      const v = new T.Vector3(-38.5, 0, 38).applyQuaternion(seatQ[p]);
+      ring(mid + (v.x + rnd(-0.8, 0.8)) * U, mid + (v.z + rnd(-0.8, 0.8)) * U, 2.1 * U);
+    }
+    ring(mid + 35.5 * U, mid + 37 * U, 2.1 * U);
+    for (let i = 0; i < 14; i++) {
+      const r = rnd(1.5, 6) * U;
+      soft(rnd(0, N), rnd(0, N), r, r * rnd(0.6, 1.4), `rgba(6, 22, 20, ${rnd(0.05, 0.13)})`);
+    }
+
+    // 絨布顆粒蓋在最上面
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = noisePattern(ctx, 256, 70, 185);
+    ctx.fillRect(0, 0, N, N);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
     const tex = new T.CanvasTexture(c);
     tex.anisotropy = 8;
-    const img = new Image();
-    img.onload = () => { c.getContext('2d').drawImage(img, 0, 0, 240, 320); tex.needsUpdate = true; };
-    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(MJ.face(kind));
     return tex;
   }
 
-  function feltTexture() {
+  // 木框：順著長邊的木紋、節疤、磕碰與刮痕
+  function woodTexture() {
+    const w = 2048, h = 128;
     const c = document.createElement('canvas');
-    c.width = c.height = 256;
-    const ctx = c.getContext('2d'), img = ctx.createImageData(256, 256);
-    for (let i = 0; i < img.data.length; i += 4) {
-      const v = 205 + Math.random() * 50;
-      img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
-      img.data[i + 3] = 255;
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    const base = ctx.createLinearGradient(0, 0, 0, h);
+    base.addColorStop(0, '#7a4f2c');
+    base.addColorStop(0.5, '#6a4224');
+    base.addColorStop(1, '#55331b');
+    ctx.fillStyle = base;
+    ctx.fillRect(0, 0, w, h);
+    // 木紋：一條條微微起伏的線
+    for (let i = 0; i < 90; i++) {
+      const y0 = rnd(0, h), amp = rnd(0.5, 4), f = rnd(0.002, 0.012), ph = rnd(0, 6.28);
+      ctx.strokeStyle = Math.random() < 0.6 ? `rgba(40, 20, 8, ${rnd(0.08, 0.3)})` : `rgba(190, 140, 90, ${rnd(0.05, 0.18)})`;
+      ctx.lineWidth = rnd(0.5, 2.2);
+      ctx.beginPath();
+      for (let x = 0; x <= w; x += 16) ctx.lineTo(x, y0 + Math.sin(x * f + ph) * amp + Math.sin(x * f * 3.1 + ph) * amp * 0.3);
+      ctx.stroke();
     }
-    ctx.putImageData(img, 0, 0);
+    // 節疤
+    for (let i = 0; i < 5; i++) {
+      const x = rnd(0, w), y = rnd(20, h - 20);
+      for (let r = 14; r > 1; r -= 2.5) {
+        ctx.strokeStyle = `rgba(35, 17, 6, ${rnd(0.15, 0.4)})`;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.ellipse(x, y, r * 2.4, r, 0, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    // 刮痕與磕碰
+    for (let i = 0; i < 70; i++) {
+      const x = rnd(0, w), y = rnd(0, h), len = rnd(6, 90), a = rnd(-0.5, 0.5);
+      ctx.strokeStyle = Math.random() < 0.6 ? `rgba(225, 190, 150, ${rnd(0.1, 0.3)})` : `rgba(20, 10, 4, ${rnd(0.2, 0.45)})`;
+      ctx.lineWidth = rnd(0.6, 1.8);
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len); ctx.stroke();
+    }
+    for (let i = 0; i < 26; i++) {
+      ctx.fillStyle = `rgba(20, 10, 4, ${rnd(0.15, 0.4)})`;
+      ctx.beginPath(); ctx.ellipse(rnd(0, w), rnd(0, h), rnd(1.5, 5), rnd(1, 3), rnd(0, 3), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = noisePattern(ctx, 128, 60, 195);
+    ctx.fillRect(0, 0, w, h);
     const tex = new T.CanvasTexture(c);
-    tex.wrapS = tex.wrapT = T.RepeatWrapping;
-    tex.repeat.set(10, 10);
+    tex.anisotropy = 8;
     return tex;
+  }
+
+  // 骰子的一面
+  function pipTexture(v) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#f7f2e4';
+    ctx.fillRect(0, 0, 128, 128);
+    const at = { 1: [[1, 1]], 2: [[0, 0], [2, 2]], 3: [[0, 0], [1, 1], [2, 2]], 4: [[0, 0], [2, 0], [0, 2], [2, 2]],
+      5: [[0, 0], [2, 0], [1, 1], [0, 2], [2, 2]], 6: [[0, 0], [2, 0], [0, 1], [2, 1], [0, 2], [2, 2]] }[v];
+    ctx.fillStyle = v === 1 || v === 4 ? '#c0352b' : '#1d2a2c';
+    for (const [x, y] of at) {
+      ctx.beginPath();
+      ctx.arc(30 + x * 34, 30 + y * 34, v === 1 ? 22 : 12, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    return new T.CanvasTexture(c);
+  }
+  // BoxGeometry 六面依序是 +x -x +y -y +z -z；下表是把各點數轉到朝上的姿勢
+  const DIE_FACES = [3, 4, 1, 6, 2, 5];
+  const DIE_AXES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map(a => new T.Vector3(...a));
+
+  // 反光用的環境：一個暗房間加幾盞柔光燈
+  function environment() {
+    const env = new T.Scene();
+    env.add(new T.Mesh(new T.SphereGeometry(60, 16, 8), new T.MeshBasicMaterial({ color: 0x16201e, side: T.BackSide })));
+    const lamp = (x, y, z, w, h, color) => {
+      const m = new T.Mesh(new T.PlaneGeometry(w, h), new T.MeshBasicMaterial({ color, side: T.DoubleSide }));
+      m.position.set(x, y, z);
+      m.lookAt(0, 0, 0);
+      env.add(m);
+    };
+    lamp(0, 45, 0, 46, 46, 0xffffff);
+    lamp(-40, 22, 28, 22, 34, 0xfff0d0);
+    lamp(40, 16, -24, 18, 26, 0xcfe6ff);
+    return new T.PMREMGenerator(renderer).fromScene(env, 0.04).texture;
   }
 
   S.init = canvas => {
@@ -72,14 +577,16 @@
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = T.PCFSoftShadowMap;
     scene = new T.Scene();
-    scene.background = new T.Color(0x0c1d1c);
+    scene.background = new T.Color(0x0b1413);
+    scene.environment = environment();
     camera = new T.PerspectiveCamera(40, 1, 1, 500);
 
-    scene.add(new T.HemisphereLight(0xffffff, 0x1c3a36, 0.62));
+    scene.add(new T.HemisphereLight(0xffffff, 0x1c3a36, 0.42));
     const sun = new T.DirectionalLight(0xfff1d8, 0.5);
     sun.position.set(-35, 90, 45);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.radius = 6;
     const sc = sun.shadow.camera;
     sc.left = sc.bottom = -70; sc.right = sc.top = 70; sc.near = 10; sc.far = 220;
     sun.shadow.bias = -0.0008;
@@ -88,11 +595,20 @@
     // 桌面與木框
     const felt = new T.Mesh(
       new T.PlaneGeometry(HALF * 2, HALF * 2),
-      new T.MeshStandardMaterial({ color: 0x236058, roughness: 1, map: feltTexture() }));
+      new T.MeshStandardMaterial({ roughness: 1, map: feltTexture(), envMapIntensity: 0.25 }));
     felt.rotation.x = -Math.PI / 2;
     felt.receiveShadow = true;
     scene.add(felt);
-    const wood = new T.MeshStandardMaterial({ color: 0x6a4426, roughness: 0.55 });
+    const grain = woodTexture();
+    const wood = new T.MeshStandardMaterial({ map: grain, bumpMap: grain, bumpScale: 0.06, roughness: 0.5, envMapIntensity: 0.5 });
+    // 四角的銅包角
+    const brass = new T.MeshStandardMaterial({ color: 0xc9a45c, roughness: 0.42, metalness: 0.55, envMapIntensity: 1 });
+    for (const [sx, sz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const cap = new T.Mesh(new T.BoxGeometry(4.5, 3.4, 4.5), brass);
+      cap.position.set(sx * (HALF + 2), 0.65, sz * (HALF + 2));
+      cap.castShadow = cap.receiveShadow = true;
+      scene.add(cap);
+    }
     for (let i = 0; i < 4; i++) {
       const rim = new T.Mesh(new T.BoxGeometry(HALF * 2 + 8, 3, 4), wood);
       const p = place(i, 0, 0.6, HALF + 2, Q_STAND);
@@ -101,18 +617,22 @@
       scene.add(rim);
     }
 
+    buildRoom(wood);
+    buildPhysics();
+    buildProps();
+
     // 中央牌局資訊
     const pc = document.createElement('canvas');
     pc.width = pc.height = 512;
     plateCtx = pc.getContext('2d');
     plateTex = new T.CanvasTexture(pc);
     plateTex.anisotropy = 8;
-    plate = new T.Mesh(new T.PlaneGeometry(20, 20), new T.MeshBasicMaterial({ map: plateTex, transparent: true }));
+    const plate = new T.Mesh(new T.PlaneGeometry(20, 20), new T.MeshBasicMaterial({ map: plateTex, transparent: true }));
     plate.rotation.x = -Math.PI / 2;
     plate.position.y = 0.03;
     scene.add(plate);
 
-    // 牌
+    // 牌：象牙層 + 綠背層 + 牌面貼圖，表面一層亮漆會反光
     const shape = roundedRect(W - 2 * BEVEL, H - 2 * BEVEL, 0.24);
     const ext = d => new T.ExtrudeGeometry(shape, {
       depth: d, bevelEnabled: true, bevelThickness: BEVEL, bevelSize: BEVEL, bevelSegments: 2, curveSegments: 4,
@@ -120,13 +640,20 @@
     const ivoryGeo = ext(0.9).translate(0, 0, -0.07);   // z: -0.19 ~ 0.95
     const jadeGeo = ext(0.52).translate(0, 0, -0.83);   // z: -0.95 ~ -0.19
     const faceGeo = new T.PlaneGeometry(2.7, 3.6);
-    const ivoryMat = new T.MeshStandardMaterial({ color: 0xf3ecd8, roughness: 0.32 });
-    const jadeMat = new T.MeshStandardMaterial({ color: 0x2c9a70, roughness: 0.3 });
+    const gloss = { roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.12, envMapIntensity: 0.55 };
+    const ivoryMat = new T.MeshPhysicalMaterial(Object.assign({ color: IVORY }, gloss));
+    // 每張牌底下一片柔邊暗影，貼著桌面跟著牌走
+    const shc = document.createElement('canvas');
+    shc.width = shc.height = 64;
+    const shx = shc.getContext('2d');
+    shx.filter = 'blur(7px)';
+    shx.fillRect(14, 14, 36, 36);
+    const shTex = new T.CanvasTexture(shc), shGeo = new T.PlaneGeometry(1, 1);
+    const jadeMat = new T.MeshPhysicalMaterial(Object.assign({ color: 0x27916a }, gloss));
     for (let kind = 0; kind < 42; kind++) {
       byKind[kind] = [];
-      const faceMat = new T.MeshStandardMaterial({
-        map: faceTexture(kind), transparent: true, depthWrite: false, roughness: 0.4,
-      });
+      const ft = faceTextures(kind);
+      const faceMat = new T.MeshPhysicalMaterial(Object.assign({ map: ft.map, normalMap: ft.normal, normalScale: new T.Vector2(1.2, 1.2) }, gloss));
       for (let n = kind < 34 ? 4 : 1; n > 0; n--) {
         const g = new T.Group();
         const a = new T.Mesh(ivoryGeo, ivoryMat), b = new T.Mesh(jadeGeo, jadeMat), f = new T.Mesh(faceGeo, faceMat);
@@ -134,7 +661,10 @@
         a.castShadow = b.castShadow = a.receiveShadow = b.receiveShadow = true;
         g.add(a, b, f);
         scene.add(g);
-        const t = { g, kind, pos: new T.Vector3(), quat: new T.Quaternion(), zone: 'wall', owner: -1, idx: -1, ring: 0, scale: 1, tw: null, bounce: 0 };
+        const sh = new T.Mesh(shGeo, new T.MeshBasicMaterial({ map: shTex, transparent: true, depthWrite: false, opacity: 0 }));
+        sh.rotation.order = 'YXZ';
+        scene.add(sh);
+        const t = { g, sh, phys: null, kind, pos: new T.Vector3(), quat: new T.Quaternion(), zone: 'wall', owner: -1, idx: -1, ring: 0, scale: 1, tw: null, bounce: 0 };
         g.userData.tile = t;
         tiles.push(t);
         byKind[kind].push(t);
@@ -146,6 +676,27 @@
       t.pos.copy(p.pos); t.quat.copy(p.quat); t.ring = i;
       t.g.position.copy(p.pos); t.g.quaternion.copy(p.quat);
     });
+
+    // 骰子
+    const dieGeo = new T.BoxGeometry(2.3, 2.3, 2.3);
+    const dieMats = DIE_FACES.map(v => new T.MeshStandardMaterial({ map: pipTexture(v), roughness: 0.3, envMapIntensity: 0.5 }));
+    for (let i = 0; i < 3; i++) {
+      const m = new T.Mesh(dieGeo, dieMats);
+      m.castShadow = true;
+      m.visible = false;
+      scene.add(m);
+      const body = new C.Body({
+        mass: 1, shape: new C.Box(new C.Vec3(1.15, 1.15, 1.15)),
+        collisionFilterGroup: G_DICE, collisionFilterMask: G_GROUND | G_DICE | G_FENCE,
+      });
+      body.sleepSpeedLimit = 0.8; body.sleepTimeLimit = 0.25;
+      let lastHit = 0;
+      body.addEventListener('collide', () => {
+        const now = performance.now();
+        if (now - lastHit > 90) { lastHit = now; sfx('dice', 0.5, () => clack(0.35)); }
+      });
+      dice.push({ m, body, live: false });
+    }
 
     // 最後一張打出的牌上方的標記
     marker = new T.Mesh(
@@ -191,6 +742,12 @@
     requestAnimationFrame(frame);
   };
 
+  function setCamera(yaw, z) {
+    const sn = Math.sin(yaw), cs = Math.cos(yaw);
+    camera.position.set(sn * 87 * z, 80 * z, cs * 87 * z);
+    camera.lookAt(sn * 13, 0, cs * 13);
+  }
+
   function resize() {
     const w = window.innerWidth, h = window.innerHeight;
     renderer.setSize(w, h, false);
@@ -210,115 +767,147 @@
     return hit ? hit.object.parent.userData.tile.idx : -1;
   }
 
-  // 玩家手牌上方在螢幕上的位置（給喊牌的字用）
-  S.screen = pid => {
-    const v = place(pid, 0, 9, pid === 0 ? 33 : 40, Q_STAND).pos.project(camera);
+  // 桌上的點在螢幕上的位置：一律以鏡頭的歸位姿勢計算，標示才不會跟著運鏡飄
+  function toScreen(v) {
+    setCamera(0, cam.fit);
+    camera.updateMatrixWorld();
+    v.project(camera);
     return { x: (v.x + 1) / 2 * window.innerWidth, y: (1 - v.y) / 2 * window.innerHeight };
+  }
+  // 玩家手牌上方（給喊牌的字用）
+  S.screen = pid => toScreen(place(pid, 0, 9, pid === 0 ? 33 : 40, Q_STAND).pos);
+  // 我每張手牌的正上方（給提示數字用），依手牌順序
+  S.handPoints = () => tiles
+    .filter(t => t.zone === 'hand' && t.owner === 0)
+    .sort((a, b) => a.idx - b.idx)
+    .map(t => toScreen(new T.Vector3(t.pos.x, 6.4, ROW - 3.3)));
+
+  S.setGame = g => {
+    game = g;
+    // 新的一場：籌碼重新平分
+    const all = [].concat(...stacks);
+    stacks.forEach((list, pid) => { list.length = 0; list.push(...all.slice(pid * 15, pid * 15 + 15)); });
+    layoutChips(false);
   };
 
-  S.setGame = g => { game = g; };
-
   // ---- 牌局狀態 → 每張牌該在哪 ----
-  // 牌牆：四邊各 18 墩，i 為整副牌的順序；偶數在上層
+  // 牌牆：四邊各 18 墩，i 為整副牌的摸牌順序（偶數在上層），從骰子決定的開門處起算
   function wallPlace(i, top) {
-    const s = Math.floor(i / 2), side = [0, 3, 2, 1][Math.floor(s / 18)], k = s % 18;
-    return place(side, (8.5 - k) * PITCH, top ? D * 1.5 + 0.02 : D / 2, WALL_Z, Q_DOWN);
+    const s = (Math.floor(i / 2) + S.wallOffset) % 72, k = s % 18;
+    return jit(place(WALL_SIDES[Math.floor(s / 18)], (8.5 - k) * PITCH, top ? D * 1.5 + 0.02 : D / 2, WALL_Z, Q_DOWN),
+      5000 + s * 2 + (top ? 1 : 0), 0.045, 0.014);
   }
 
   function computeSlots() {
     const out = [], g = game;
-    const add = (kind, p, zone, owner = -1, idx = -1, ring = 0, scale = 1) =>
-      out.push({ kind, pos: p.pos, quat: p.quat, zone, owner, idx, ring, scale });
+    const add = (kind, p, zone, o) =>
+      out.push(Object.assign({ kind, pos: p.pos, quat: p.quat, zone, owner: -1, idx: -1, ring: 0, scale: 1 }, o));
 
     const n = g.wall.length;
     for (let j = 0; j < n; j++) {
       const i = g.taken + j;
       // 下層被從牌尾補走時，上層那張落到桌面
-      add(g.wall[j], wallPlace(i, i % 2 === 0 && j + 1 < n), 'wall', -1, -1, i);
+      add(g.wall[j], wallPlace(i, i % 2 === 0 && j + 1 < n), 'wall', { ring: i });
     }
 
     g.players.forEach((p, pid) => {
-      const shown = S.reveal && S.reveal.pid === pid;
+      const winner = !!S.reveal && S.reveal.pid === pid;
+      const shown = winner || S.revealAll;
+      const dir = order(pid), al = along(pid), dp = deep(pid);
       const hand = p.hand.slice();
       let discards = p.discards;
       let gapLast = g.turn === pid && g.drawn !== null && hand.length % 3 === 2;
       if (S.reveal && S.reveal.ron) {
         // 放槍的那張從牌河移到胡牌者手邊
         if (S.reveal.from === pid) discards = discards.slice(0, -1);
-        if (shown) { hand.push(g.lastDiscard.tile); gapLast = true; }
+        if (winner) { hand.push(g.lastDiscard.tile); gapLast = true; }
       }
 
       // 花牌擺在自己牌河右側的空地，四張一排
       p.flowers.forEach((t, i) => {
-        add(t, place(pid, 14.5 + (i % 4) * PITCH, D / 2, 13 + H / 2 + Math.floor(i / 4) * (H + 0.15), Q_UP), 'flower', pid);
+        add(t, jit(flat(pid, 13 + al / 2 + (i % 4) * (al + 0.2), 13 + dp / 2 + Math.floor(i / 4) * (dp + 0.2)), 2000 + pid * 100 + i, 0.07, 0.035), 'flower', { owner: pid });
       });
-      const left = -EDGE;
 
       // 吃碰槓：第一組靠最右，之後往左排
-      let mx = EDGE - W / 2;
+      let mx = EDGE - al / 2;
       p.melds.forEach((m, mi) => {
         // 連線時別家的暗槓看不到牌種，m.fake 是四張佔位牌
-        const ks = m.fake ? m.fake : m.type === 'chi' ? [m.tile, m.tile + 1, m.tile + 2]
+        let ks = m.fake ? m.fake : m.type === 'chi' ? [m.tile, m.tile + 1, m.tile + 2]
           : m.type === 'pong' ? [m.tile, m.tile, m.tile] : [m.tile, m.tile, m.tile, m.tile];
+        if (dir < 0) ks = ks.slice().reverse();
         for (let i = ks.length - 1; i >= 0; i--) {
           const down = m.type === 'ankong' && !shown && (pid !== 0 || i === 0 || i === 3);
-          add(ks[i], place(pid, mx, D / 2, ROW, down ? Q_DOWN : Q_UP), 'meld', pid, mi * 4 + i);
-          mx -= PITCH;
+          add(ks[i], jit(flat(pid, mx, ROW, down), 3000 + pid * 1000 + Math.round(mx * 3), 0.03, 0.012), 'meld',
+            { owner: pid, idx: mi * 4 + (dir < 0 ? ks.length - 1 - i : i) });
+          mx -= al;
         }
         mx -= 0.9;
       });
-      const right = p.melds.length ? mx + PITCH / 2 - 0.3 : EDGE;
+      const right = p.melds.length ? mx + al / 2 - 0.3 : EDGE;
 
-      const gap = gapLast ? 1.6 : 0;
-      // 自己的手牌放大一些，比較好認
-      const sc = pid === 0 && !shown ? MY_SCALE : 1, step = PITCH * sc;
-      const width = hand.length * step + gap;
+      // 手牌：自己的放大一些；攤開時改成平躺
+      const sc = pid === 0 && !shown ? MY_SCALE : 1, step = shown ? al : PITCH * sc;
+      const gap = gapLast ? 1.6 : 0, cnt = hand.length;
+      const width = cnt * step + gap;
       let cx = 0;
       if (cx + width / 2 > right) cx = right - width / 2;
-      if (cx - width / 2 < left) cx = left + width / 2;
+      if (cx - width / 2 < -EDGE) cx = -EDGE + width / 2;
       hand.forEach((t, i) => {
-        const hx = cx - width / 2 + step / 2 + i * step + (gapLast && i === hand.length - 1 ? gap : 0);
+        const last = gapLast && i === cnt - 1;
         let pl;
-        if (shown) pl = place(pid, hx, D / 2, ROW, Q_UP);
-        else if (pid === 0) {
-          const lift = i === S.selected ? 1.5 : i === hover && S.pickable ? 0.5 : 0;
-          const y = (H / 2 * Math.cos(LEAN) + D / 2 * Math.sin(LEAN)) * sc;
-          pl = place(0, hx, y + lift * Math.cos(LEAN), ROW - lift * Math.sin(LEAN), Q_LEAN);
-        } else pl = place(pid, hx, H / 2, ROW, Q_STAND);
-        add(t, pl, 'hand', pid, i, 0, sc);
+        if (shown) {
+          // 攤開的牌照我的閱讀方向排，胡的那張隔開放在最後
+          const j = dir > 0 ? i : cnt - 1 - i;
+          const hx = cx - width / 2 + step / 2 + j * step + (dir > 0 ? (last ? gap : 0) : (gapLast && !last ? gap : 0));
+          pl = flat(pid, hx, ROW);
+        } else {
+          const hx = cx - width / 2 + step / 2 + i * step + (last ? gap : 0);
+          if (pid === 0) {
+            const lift = i === S.selected ? 1.5 : i === hover && S.pickable ? 0.5 : 0;
+            const y = (H / 2 * Math.cos(LEAN) + D / 2 * Math.sin(LEAN)) * sc;
+            pl = place(0, hx, y + lift * Math.cos(LEAN), ROW - lift * Math.sin(LEAN), Q_LEAN);
+          } else pl = place(pid, hx, H / 2, ROW, Q_STAND);
+        }
+        add(t, pl, 'hand', { owner: pid, idx: i, scale: sc, win: winner && last });
       });
 
+      const cols = pid % 2 ? 5 : 7;
       discards.forEach((t, i) => {
-        const col = i % POOL_COLS, row = Math.floor(i / POOL_COLS);
-        add(t, place(pid, (col - (POOL_COLS - 1) / 2) * PITCH, D / 2, POOL_Z + H / 2 + row * (H + 0.15), Q_UP), 'discard', pid, i);
+        const col = i % cols, row = Math.floor(i / cols);
+        add(t, jit(flat(pid, dir * (col - (cols - 1) / 2) * (al + 0.25), POOL_Z + dp / 2 + row * (dp + 0.2)), 1000 + pid * 100 + i, 0.08, 0.04), 'discard', { owner: pid, idx: i });
       });
     });
     return out;
   }
 
   // ---- 動畫 ----
+  // o: dur 毫秒、arc 拋物線高度、spin 翻滾圈數、delay、pre 起飛前先提起的時間、land 落桌效果（true 或 'big'）
   function go(t, slot, o) {
+    if (t.phys) endPhys(t);
     t.pos.copy(slot.pos); t.quat.copy(slot.quat);
     const s0 = t.g.scale.x;
     t.scale = slot.scale || 1;
+    const k = S.reduced ? 0.4 : 1, pre = S.reduced ? 0 : o.pre || 0;
     t.tw = {
-      s0,
+      s0, pre, phys: !!o.phys && !S.reduced,
       p0: t.g.position.clone(), q0: t.g.quaternion.clone(),
-      t0: performance.now() + (o.delay || 0),
-      dur: o.dur, arc: o.arc || 0, spin: o.spin || 0, land: !!o.land,
+      t0: performance.now() + (o.delay || 0) * k + pre,
+      dur: o.dur * k, arc: (o.arc || 0) * k, spin: S.reduced ? 0 : o.spin || 0, land: o.land || false,
     };
   }
 
   function motion(t, slot, dist) {
-    const from = t.zone, to = slot.zone;
+    const from = t.zone, to = slot.zone, other = slot.owner !== 0;
     const delay = S.dealing ? t.ring * 9 : 0;
-    if (to === 'discard' && from !== 'discard') return { dur: 540, arc: 10, spin: 1, land: true };
-    if (to === 'meld') return { dur: 460, arc: 6, spin: from === 'discard' ? 1 : 0, land: true };
+    // 電腦出牌：先從手牌裡抽起來，再翻滾著打出去
+    if (to === 'discard' && from !== 'discard') return { phys: true, dur: 300, arc: 4, land: true, pre: other ? 240 : 0 };
+    // 吃碰槓：被叫的那張貼著桌面滑過去，手裡的牌翻開跟上
+    if (to === 'meld' && from === 'discard') return { dur: 430, arc: 1, land: true, pre: 150 };
+    if (to === 'meld') return { dur: 460, arc: 5, land: true, pre: other ? 160 : 0 };
     if (to === 'flower') return { dur: 520, arc: 7, spin: 1, delay };
     if (to === 'hand' && from === 'wall') return { dur: 400, arc: 5, delay };
-    if (to === 'hand' && S.reveal && S.reveal.pid === slot.owner) {
-      return { dur: 480, arc: from === 'discard' ? 9 : 2.5, spin: from === 'discard' ? 2 : 0, delay: slot.idx * 35, land: from === 'discard' };
-    }
+    if (slot.win) return { dur: 900, arc: 15, spin: 2, delay: 850, land: 'big' };
+    if (to === 'hand' && (S.reveal || S.revealAll)) return { dur: 480, arc: 2.5, delay: slot.idx * 35 };
     if (to === 'wall') return { dur: 260 };
     return { dur: dist > PITCH * 1.5 ? 260 : 150, arc: dist > PITCH * 1.5 ? 2.5 : 0 };
   }
@@ -378,9 +967,11 @@
   // 略過動畫，直接到位
   S.settle = () => {
     for (const t of tiles) {
+      if (t.phys) endPhys(t);
       t.tw = null; t.bounce = 0;
       t.g.position.copy(t.pos); t.g.quaternion.copy(t.quat); t.g.scale.setScalar(t.scale);
     }
+    for (const a of props.splice(0)) a.obj.position.copy(a.p1);
     cam.yaw = cam.yawTo; cam.zoom = cam.zoomTo;
   };
 
@@ -393,68 +984,156 @@
     return a;
   }
 
-  // 新的一局：洗牌 → 砌牌 → 發牌
+  function hideDice() {
+    for (const d of dice) {
+      if (d.live) { world.removeBody(d.body); d.live = false; }
+      d.m.visible = false;
+    }
+  }
+  // 莊家擲三顆骰子，等它們停下來再讀朝上的點數
+  async function rollDice(dealer) {
+    dice.forEach((d, i) => {
+      const from = place(dealer, (i - 1) * 3.4, 5 + i * 1.6, 10, Q_STAND).pos, b = d.body;
+      b.position.set(from.x, from.y, from.z);
+      b.quaternion.setFromEuler(rnd(0, 6), rnd(0, 6), rnd(0, 6));
+      b.velocity.set((rnd(-3, 3) - from.x) * 1.5, rnd(4, 12), (rnd(-3, 3) - from.z) * 1.5);
+      b.angularVelocity.set(rnd(-25, 25), rnd(-25, 25), rnd(-25, 25));
+      if (!d.live) { world.addBody(b); d.live = true; }
+      b.wakeUp();
+      d.m.visible = true;
+    });
+    const t0 = performance.now();
+    while (performance.now() - t0 < 3200) {
+      await sleep(120);
+      if (performance.now() - t0 > 700 && dice.every(d => d.body.sleepState === 2)) break;
+    }
+    const q = new T.Quaternion();
+    return dice.map(d => {
+      q.set(d.body.quaternion.x, d.body.quaternion.y, d.body.quaternion.z, d.body.quaternion.w);
+      let best = 0, top = -2;
+      DIE_AXES.forEach((a, i) => { const y = a.clone().applyQuaternion(q).y; if (y > top) { top = y; best = i; } });
+      return DIE_FACES[best];
+    });
+  }
+
+  // 立刻擺到定位，不播動畫
+  function snap(t, pl) {
+    t.pos.copy(pl.pos); t.quat.copy(pl.quat); t.scale = 1; t.tw = null;
+    t.g.position.copy(pl.pos); t.g.quaternion.copy(pl.quat); t.g.scale.setScalar(1);
+  }
+
+  // 新的一局：洗牌 → 砌牌 → 擲骰開門 → 發牌
   S.deal = async () => {
-    S.reveal = null; S.mark = false; S.idle = false; S.selected = -1;
+    S.reveal = null; S.revealAll = false; S.mark = false; S.idle = false; S.selected = -1;
+    S.seed = Math.random() * 1000;
     cam.yawTo = 0; cam.zoomTo = 1;
+    hideDice();
+    fly(dealerBlock, dealerSpot(game.dealer), { dur: 600, arc: 8 });
+    // 從莊家起逆時針數到第 sum 家，再從那一面牆的右端數 sum 墩開門
+    const breakAt = sum => (WALL_SIDES.indexOf((game.dealer + sum - 1) % 4) * 18 + sum) % 72;
+    for (const t of tiles) { if (t.phys) endPhys(t); t.zone = 'wall'; }
+
+    if (S.reduced) {
+      S.wallOffset = breakAt(3 + Math.floor(Math.random() * 16));
+      S.sync();
+      await sleep(500);
+      return;
+    }
+
     cam.yaw = Math.atan2(Math.sin(cam.yaw), Math.cos(cam.yaw)) + 0.5;
     for (const t of tiles) {
       const a = Math.random() * Math.PI * 2, r = 4 + Math.sqrt(Math.random()) * 24;
       const q = new T.Quaternion().setFromAxisAngle(Y, Math.random() * Math.PI * 2).multiply(Q_DOWN);
-      t.zone = 'wall';
       go(t, { pos: new T.Vector3(Math.cos(a) * r, D / 2 + Math.random() * 3, Math.sin(a) * r), quat: q },
         { dur: 520, arc: 5, spin: 1, delay: Math.random() * 200 });
     }
-    clack(0.5);
-    await sleep(850);
+    sfx('shuffle', 0.8, () => { for (let i = 0; i < 16; i++) setTimeout(() => clack(0.25 + Math.random() * 0.35), Math.random() * 900); });
+    await sleep(900);
 
+    // 先把牌牆砌起來（這時還不知道從哪裡開門）
+    S.wallOffset = 0;
+    shuffled(tiles).forEach((t, i) => { t.ring = i; go(t, wallPlace(i, i % 2 === 0), { dur: 480, arc: 4, delay: i * 4 }); });
+    await sleep(1200);
+
+    const vals = await rollDice(game.dealer);
+    const sum = vals[0] + vals[1] + vals[2];
+    if (S.onDice) S.onDice(game.dealer, sum);
+    await sleep(900);
+
+    // 牌背看起來都一樣：開門位置定了之後，趁沒人看得出來把每張牌換到它真正的位置
+    S.wallOffset = breakAt(sum);
     const n = game.wall.length, used = new Set(), free = [];
     for (let i = 0; i < 144; i++) if (i < game.taken || i >= game.taken + n) free.push(i);
-    const toWall = (t, i) => {
-      t.ring = i;
-      go(t, wallPlace(i, i % 2 === 0), { dur: 480, arc: 4, delay: i * 4 });
-    };
+    const put = (t, i) => { t.ring = i; snap(t, wallPlace(i, i % 2 === 0)); };
     for (let j = 0; j < n; j++) {
       const t = byKind[game.wall[j]].find(m => !used.has(m));
       used.add(t);
-      toWall(t, game.taken + j);
+      put(t, game.taken + j);
     }
-    tiles.filter(t => !used.has(t)).forEach((t, k) => toWall(t, free[k]));
-    await sleep(1250);
+    tiles.filter(t => !used.has(t)).forEach((t, k) => put(t, free[k]));
 
     S.dealing = true;
     S.sync();
     S.dealing = false;
     await sleep(game.taken * 9 + 600);
+    hideDice();
+  };
+
+  // 喊牌時鏡頭往那一家靠一下
+  let focusTimer = 0;
+  S.focus = (pid, ms) => {
+    if (S.reduced) return;
+    cam.yawTo = [0, 0.2, 0, -0.2][pid];
+    cam.zoomTo = pid === 2 ? 0.93 : 0.95;
+    clearTimeout(focusTimer);
+    focusTimer = setTimeout(() => { if (!S.reveal) { cam.yawTo = 0; cam.zoomTo = 1; } }, ms);
   };
 
   // 胡牌：鏡頭轉向贏家、灑金粉
   S.celebrate = pid => {
-    cam.yawTo = [0, 0.32, 0, -0.32][pid];
-    cam.zoomTo = 0.93;
+    clearTimeout(focusTimer);
+    if (!S.reduced) { cam.yawTo = [0, 0.32, 0, -0.32][pid]; cam.zoomTo = 0.93; }
     const c = place(pid, 0, 3, ROW - 4, Q_STAND).pos, pos = sparks.geometry.attributes.position;
+    const wide = pid % 2 ? [6, 30] : [30, 6];
     sparkVel.forEach((v, i) => {
-      pos.setXYZ(i, c.x + (Math.random() - 0.5) * 30, c.y, c.z + (Math.random() - 0.5) * 6);
+      pos.setXYZ(i, c.x + (Math.random() - 0.5) * wide[0], c.y, c.z + (Math.random() - 0.5) * wide[1]);
       v.set((Math.random() - 0.5) * 16, 14 + Math.random() * 22, (Math.random() - 0.5) * 16);
     });
     pos.needsUpdate = true;
-    sparkLife = 2.4;
+    sparkLife = 2.6;
     sparks.visible = true;
-    clack(1);
   };
+  // 結算看完，鏡頭歸位
+  S.rest = () => { cam.yawTo = 0; cam.zoomTo = 1; };
 
-  function ring(pos) {
+  function ring(pos, big) {
     const r = rings.find(x => x.userData.t0 < 0) || rings[0];
     r.position.set(pos.x, 0.06, pos.z);
     r.userData.t0 = performance.now();
+    r.userData.big = big ? 2.6 : 1;
   }
 
-  // ---- 音效：合成一聲牌敲桌面 ----
+  // ---- 音效 ----
   let actx = null;
   S.audio = () => {
     if (actx) return;
     try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
   };
+  // sounds/ 資料夾裡放了同名的 mp3 就播錄音，否則退回合成音
+  const samples = {};
+  for (const name of ['discard', 'shuffle', 'dice', 'win']) {
+    const a = new Audio('sounds/' + name + '.mp3');
+    a.addEventListener('canplaythrough', () => { samples[name] = a; }, { once: true });
+  }
+  function sfx(name, vol, fallback) {
+    if (S.muted) return;
+    const a = samples[name];
+    if (!a) { fallback(); return; }
+    const c = a.cloneNode();
+    c.volume = Math.min(1, vol);
+    c.play().catch(() => {});
+  }
+  // 牌敲桌面
   function clack(vol) {
     if (!actx || S.muted) return;
     const len = Math.floor(actx.sampleRate * 0.07), buf = actx.createBuffer(1, len, actx.sampleRate);
@@ -467,6 +1146,35 @@
     src.connect(bp); bp.connect(gain); gain.connect(actx.destination);
     src.start();
   }
+  // 一聲短音：freq 赫茲、dur 秒
+  function tone(freq, dur, vol, type) {
+    if (!actx || S.muted) return;
+    const o = actx.createOscillator(), gain = actx.createGain(), t = actx.currentTime;
+    o.type = type || 'sine';
+    o.frequency.value = freq;
+    gain.gain.setValueAtTime(vol, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(gain); gain.connect(actx.destination);
+    o.start(t); o.stop(t + dur);
+  }
+  S.tick = () => tone(880, 0.12, 0.15, 'triangle');
+  S.fanfare = () => [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(f, 0.5, 0.16, 'triangle'), i * 110));
+  // 喊牌：有中文語音就念出來，沒有就用幾聲短音代替（吃一聲、碰兩聲、槓三聲）
+  S.say = text => {
+    if (S.muted) return;
+    const word = text.includes('胡') ? '胡' : text.includes('槓') ? '槓' : text;
+    const synth = window.speechSynthesis;
+    const voice = synth && synth.getVoices().find(v => /^zh/i.test(v.lang));
+    if (voice) {
+      const u = new SpeechSynthesisUtterance(word);
+      u.voice = voice; u.lang = voice.lang; u.rate = 1.15; u.volume = 0.9;
+      synth.cancel();
+      synth.speak(u);
+      return;
+    }
+    const n = { 吃: 1, 碰: 2, 槓: 3 }[word] || 1;
+    for (let i = 0; i < n; i++) setTimeout(() => tone(word === '胡' || word === '自摸' ? 660 : 440, 0.18, 0.2, 'square'), i * 130);
+  };
 
   // ---- 中央資訊牌 ----
   function drawPlate() {
@@ -516,29 +1224,53 @@
   }
 
   // ---- 每一幀 ----
+  const vTmp = new T.Vector3();
   const tmpQ = new T.Quaternion(), spinAxis = new T.Vector3(1, 0.25, 0).normalize();
+  const smooth = k => k * k * (3 - 2 * k);
+  const PRE_LIFT = 1.5;
   let lastNow = performance.now();
   function frame(now) {
     requestAnimationFrame(frame);
     const dt = Math.min(0.05, (now - lastNow) / 1000);
     lastNow = now;
 
+    world.step(1 / 120, dt, 4);
     for (const t of tiles) {
       const tw = t.tw, g = t.g;
+      if (t.phys) {
+        // 物理接手中：照抄剛體的位置，時間到了再推正
+        const p = t.phys;
+        g.position.set(p.b.position.x, p.b.position.y, p.b.position.z);
+        g.quaternion.set(p.b.quaternion.x, p.b.quaternion.y, p.b.quaternion.z, p.b.quaternion.w);
+        g.scale.setScalar(g.scale.x + (1 - g.scale.x) * 0.25);
+        if (now > p.until) go(t, { pos: t.pos.clone(), quat: t.quat.clone(), scale: t.scale }, { dur: 260, arc: 0.6 });
+        continue;
+      }
       if (tw) {
         let k = (now - tw.t0) / tw.dur;
-        if (k >= 0) {
-          if (k >= 1) k = 1;
-          const e = k * k * (3 - 2 * k);
-          g.position.lerpVectors(tw.p0, t.pos, e);
-          g.position.y += tw.arc * 4 * k * (1 - k);
-          g.quaternion.slerpQuaternions(tw.q0, t.quat, e);
-          g.scale.setScalar(tw.s0 + (t.scale - tw.s0) * e);
-          if (tw.spin) g.quaternion.multiply(tmpQ.setFromAxisAngle(spinAxis, Math.PI * 2 * tw.spin * e));
-          if (k === 1) {
-            t.tw = null;
-            if (tw.land) { ring(t.pos); clack(0.8); t.bounce = now; }
+        if (k < 0) {
+          // 起飛前先提起
+          if (tw.pre && now > tw.t0 - tw.pre) {
+            g.position.copy(tw.p0);
+            g.position.y += PRE_LIFT * smooth((now - (tw.t0 - tw.pre)) / tw.pre);
           }
+          continue;
+        }
+        if (tw.phys) { launch(t, now); continue; }
+        if (k >= 1) k = 1;
+        // 大力拍下的那張：前段慢、最後加速砸下
+        const e = tw.land === 'big' ? k * k * k : smooth(k);
+        g.position.lerpVectors(tw.p0, t.pos, e);
+        g.position.y += tw.arc * 4 * k * (1 - k) + (tw.pre ? PRE_LIFT * (1 - e) : 0);
+        g.quaternion.slerpQuaternions(tw.q0, t.quat, e);
+        g.scale.setScalar(tw.s0 + (t.scale - tw.s0) * e);
+        if (tw.spin) g.quaternion.multiply(tmpQ.setFromAxisAngle(spinAxis, Math.PI * 2 * tw.spin * e));
+        if (k === 1) {
+          t.tw = null;
+          if (tw.land === 'big') {
+            ring(t.pos, true); clack(1); tone(85, 0.35, 0.5); sfx('win', 0.9, S.fanfare);
+            cam.shake = 1;
+          } else if (tw.land) { ring(t.pos); sfx('discard', 0.8, () => clack(0.8)); t.bounce = now; }
         }
       } else if (t.bounce) {
         // 落桌後輕彈一下
@@ -548,11 +1280,42 @@
       }
     }
 
+    for (const d of dice) {
+      if (!d.live) continue;
+      d.m.position.set(d.body.position.x, d.body.position.y, d.body.position.z);
+      d.m.quaternion.set(d.body.quaternion.x, d.body.quaternion.y, d.body.quaternion.z, d.body.quaternion.w);
+    }
+
+    for (let i = props.length - 1; i >= 0; i--) {
+      const a = props[i];
+      let k = (now - a.t0) / a.dur;
+      if (k < 0) continue;
+      if (k >= 1) k = 1;
+      a.obj.position.lerpVectors(a.p0, a.p1, smooth(k));
+      a.obj.position.y += a.arc * 4 * k * (1 - k);
+      if (k === 1) { props.splice(i, 1); if (a.done) a.done(); }
+    }
+
+    // 牌底的貼地暗影：牌離桌面越高越淡
+    for (const t of tiles) {
+      const g = t.g, sh = t.sh, s = g.scale.x;
+      const up = Math.abs(vTmp.set(0, 1, 0).applyQuaternion(g.quaternion).y);
+      const bottom = g.position.y - (H / 2 * up + D / 2 * (1 - up)) * s;
+      const o = 0.55 * Math.max(0, 1 - Math.abs(bottom) / 2.5);
+      sh.visible = o > 0.02;
+      if (!sh.visible) continue;
+      sh.material.opacity = o;
+      vTmp.set(1, 0, 0).applyQuaternion(g.quaternion);
+      sh.position.set(g.position.x, 0.02, g.position.z);
+      sh.rotation.set(-Math.PI / 2, Math.atan2(-vTmp.z, vTmp.x), 0);
+      sh.scale.set((W + 1.7) * s, (H * (1 - up) + D * up + 1.7) * s, 1);
+    }
+
     for (const r of rings) {
       if (r.userData.t0 < 0) continue;
-      const k = (now - r.userData.t0) / 480;
+      const k = (now - r.userData.t0) / (480 * (r.userData.big > 1 ? 1.6 : 1));
       if (k >= 1) { r.userData.t0 = -1; r.material.opacity = 0; continue; }
-      r.scale.setScalar(1 + k * 2.2);
+      r.scale.setScalar((1 + k * 2.2) * r.userData.big);
       r.material.opacity = 0.75 * (1 - k);
     }
 
@@ -561,7 +1324,7 @@
     if (game && S.mark && game.lastDiscard) {
       const from = game.lastDiscard.from, ds = game.players[from].discards;
       const t = tiles.find(x => x.zone === 'discard' && x.owner === from && x.idx === ds.length - 1);
-      if (t && !t.tw) {
+      if (t && !t.tw && !t.phys) {
         show = true;
         marker.position.set(t.pos.x, 4.4 + Math.sin(now / 260) * 0.45, t.pos.z);
         marker.rotation.y += dt * 3.2;
@@ -587,9 +1350,12 @@
       cam.yaw += (cam.yawTo - cam.yaw) * Math.min(1, dt * 2.6);
       cam.zoom += (cam.zoomTo - cam.zoom) * Math.min(1, dt * 2.6);
     }
-    const z = cam.zoom * cam.fit, sn = Math.sin(cam.yaw), cs = Math.cos(cam.yaw);
-    camera.position.set(sn * 87 * z, 80 * z, cs * 87 * z);
-    camera.lookAt(sn * 13, 0, cs * 13);
+    setCamera(cam.yaw, cam.zoom * cam.fit);
+    if (cam.shake > 0.01) {
+      camera.position.x += (Math.random() - 0.5) * cam.shake * 1.6;
+      camera.position.y += (Math.random() - 0.5) * cam.shake * 1.6;
+      cam.shake *= Math.pow(0.002, dt);
+    }
     renderer.render(scene, camera);
   }
 })();

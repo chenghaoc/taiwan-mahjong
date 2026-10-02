@@ -8,6 +8,7 @@
 </head>
 <body>
 <canvas id="stage"></canvas>
+<div id="lens"><i class="far"></i><i class="near"></i><i class="vignette"></i></div>
 <main id="hud" hidden>
   <div class="who-box" id="who0"></div>
   <div class="who-box" id="who1"></div>
@@ -16,10 +17,18 @@
   <div id="shout" hidden></div>
   <div id="actions"></div>
   <div id="hint" hidden></div>
-  <button id="mute" class="btn quiet">音效：開</button>
+  <div id="tips"></div>
+  <div id="tai" hidden></div>
+  <div id="toggles">
+    <button id="tips-toggle" class="btn quiet">提示：開</button>
+    <button id="motion" class="btn quiet">動畫：完整</button>
+    <button id="mute" class="btn quiet">音效：開</button>
+  </div>
+  <button id="back" class="btn win" hidden>回到結算</button>
 </main>
 <div id="overlay" hidden></div>
 <script src="js/vendor/three.min.js"></script>
+<script src="js/vendor/cannon.min.js"></script>
 <script src="js/rules.js"></script>
 <script src="js/ai.js"></script>
 <script src="js/game.js"></script>
