@@ -285,6 +285,8 @@
         } else if (m.t === 'event') {
           show(m.state, m.type === 'deal');
           if (m.type === 'deal') { $('#overlay').hidden = true; $('#hud').hidden = false; }
+          // 喊牌語音平常掛在 Game 的事件上；連線時牌局在主機，這裡自己喊
+          if (m.type === 'call' && S.say) S.say(m.d.text, m.d.pid);
           await ui.emit(m.type, m.d);
         } else if (m.t === 'ask') {
           pending = { kind: m.kind, o: m.o, tile: m.tile, from: m.from, secs: m.secs, seq: m.seq,

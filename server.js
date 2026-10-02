@@ -238,7 +238,7 @@ function room(key) {
   return rooms.get(key);
 }
 const cleanName = s => String(s || '').replace(/[<>&"']/g, '').trim().slice(0, 8) || '玩家';
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.mp3': 'audio/mpeg' };
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x'), q = url.searchParams;
@@ -266,7 +266,7 @@ const server = http.createServer((req, res) => {
     });
   } else {
     const file = url.pathname === '/' ? '/index.html' : url.pathname;
-    if (!/^\/(index\.html|(css|js)\/[\w./-]+)$/.test(file) || file.includes('..')) { res.writeHead(404); res.end(); return; }
+    if (!/^\/(index\.html|(css|js|audio)\/[\w./-]+)$/.test(file) || file.includes('..')) { res.writeHead(404); res.end(); return; }
     fs.readFile(path.join(__dirname, file), (err, buf) => {
       if (err) { res.writeHead(404); res.end(); return; }
       res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
