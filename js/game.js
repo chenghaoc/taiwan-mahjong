@@ -264,11 +264,12 @@
           best = { r, order: cand.order, q: cand.q, d };
         }
       };
-      // 先問電腦，再只拿還搶得到的選項問真人
+      // 先問電腦，再只拿還搶得到的選項問真人；真人同時問，不必互等
       for (const cand of cands) {
         if (this.agents[cand.q].isHuman) continue;
         consider(cand, await this.agents[cand.q].claim(this, cand.q, cand.o, tile, from));
       }
+      const asked = [];
       for (const cand of cands) {
         if (!this.agents[cand.q].isHuman) continue;
         const o = {}, br = best ? best.r : 0;
@@ -276,8 +277,10 @@
         if (br < 3) { if (cand.o.pong) o.pong = true; if (cand.o.kong) o.kong = true; }
         if (br < 2 && cand.o.chi) o.chi = cand.o.chi;
         if (!(o.hu || o.pong || o.kong || o.chi)) continue;
-        consider({ q: cand.q, o, order: cand.order }, await this.agents[cand.q].claim(this, cand.q, o, tile, from));
+        asked.push({ q: cand.q, o, order: cand.order });
       }
+      const ds = await Promise.all(asked.map(c => this.agents[c.q].claim(this, c.q, c.o, tile, from)));
+      asked.forEach((c, i) => consider(c, ds[i]));
       return best;
     }
 

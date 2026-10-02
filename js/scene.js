@@ -256,16 +256,17 @@
 
       // 吃碰槓：第一組靠最右，之後往左排
       let mx = EDGE - W / 2;
-      for (const m of p.melds) {
-        const ks = m.type === 'chi' ? [m.tile, m.tile + 1, m.tile + 2]
+      p.melds.forEach((m, mi) => {
+        // 連線時別家的暗槓看不到牌種，m.fake 是四張佔位牌
+        const ks = m.fake ? m.fake : m.type === 'chi' ? [m.tile, m.tile + 1, m.tile + 2]
           : m.type === 'pong' ? [m.tile, m.tile, m.tile] : [m.tile, m.tile, m.tile, m.tile];
         for (let i = ks.length - 1; i >= 0; i--) {
           const down = m.type === 'ankong' && !shown && (pid !== 0 || i === 0 || i === 3);
-          add(ks[i], place(pid, mx, D / 2, ROW, down ? Q_DOWN : Q_UP), 'meld', pid);
+          add(ks[i], place(pid, mx, D / 2, ROW, down ? Q_DOWN : Q_UP), 'meld', pid, mi * 4 + i);
           mx -= PITCH;
         }
         mx -= 0.9;
-      }
+      });
       const right = p.melds.length ? mx + PITCH / 2 - 0.3 : EDGE;
 
       const gap = gapLast ? 1.6 : 0;
@@ -360,6 +361,18 @@
       });
     }
     drawPlate();
+  };
+
+  // 連線時蓋著的牌只是佔位：把兩張實體牌的牌面對調，位置不動
+  S.swapKinds = (a, b) => {
+    const find = d => tiles.find(t => t.zone === d.zone && (d.zone === 'wall' ? t.ring === d.ring : t.owner === d.owner && t.idx === d.idx));
+    const x = find(a), y = find(b);
+    if (!x || !y || x.kind === y.kind) return;
+    const fx = x.g.children[2], fy = y.g.children[2];
+    [fx.material, fy.material] = [fy.material, fx.material];
+    byKind[x.kind][byKind[x.kind].indexOf(x)] = y;
+    byKind[y.kind][byKind[y.kind].indexOf(y)] = x;
+    [x.kind, y.kind] = [y.kind, x.kind];
   };
 
   // 略過動畫，直接到位

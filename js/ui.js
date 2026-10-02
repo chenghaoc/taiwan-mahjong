@@ -41,7 +41,8 @@
       return ws.map(t => tile(t, 't-xs')).join('') + `<span>（還有 ${left} 張）</span>`;
     };
     if (pending && pending.kind === 'claim') {
-      return `<span>${game.players[pending.from].name}打出</span>${tile(pending.tile, 't-xs')}<span>，要嗎？</span>`;
+      return `<span>${game.players[pending.from].name}打出</span>${tile(pending.tile, 't-xs')}<span>，要嗎？` +
+        `${pending.secs ? `（${pending.secs} 秒內沒選算過）` : ''}</span>`;
     }
     if (pending && pending.kind === 'turn') {
       if (selected < 0) return '<span>輪到你了。點一張牌選取，再點一次打出。</span>';
@@ -204,34 +205,131 @@
       `<p>每家付 底 ${game.base} ＋ 台數 × ${game.taiValue}。</p>${next}`);
   }
 
-  function showStart(extra = '') {
+  function showStart(extra, lan) {
     S.idle = true;
     return dialog(
       `${extra}<h1>台灣十六張麻將</h1>` +
       '<p>你和三位電腦對打。每人十六張，湊滿五組面子加一對將就胡牌；只能吃上家的牌，碰、槓、胡不限。</p>' +
       '<p>底 100、每台 20，莊家連莊照連 N 拉 N 計算。</p>' +
       '<div class="btns"><button class="btn win" data-v="1">打一圈</button>' +
-      '<button class="btn" data-v="4">打四圈（一將）</button></div>');
+      '<button class="btn" data-v="4">打四圈（一將）</button>' +
+      (lan ? '<button class="btn" data-v="net">連線對戰</button>' : '') + '</div>');
+  }
+
+  function rankHtml() {
+    const rank = game.players.slice().sort((a, b) => b.score - a.score);
+    const rows = rank.map((p, i) =>
+      `<tr><td>第 ${i + 1} 名</td><td>${p.name}</td><td class="n ${p.score > 0 ? 'plus' : p.score < 0 ? 'minus' : ''}">${signed(p.score)}</td></tr>`).join('');
+    return `<h1>牌局結束</h1><table>${rows}</table>`;
+  }
+
+  async function playLocal(rounds) {
+    game = new MJ.Game({ names: ['你', '阿明', '美玲', '老陳'], agents: [human, MJ.ai, MJ.ai, MJ.ai], ui, rounds });
+    S.setGame(game);
+    $('#hud').hidden = false;
+    while (!game.over) {
+      const r = await game.playHand();
+      refresh();
+      await showResult(r);
+      game.advance(r);
+    }
+    return rankHtml() + '<p>&nbsp;</p>';
+  }
+
+  // ---- 連線對戰：牌局在牌桌主機上跑，這裡只負責顯示與回覆 ----
+  // 沒有按鈕要等的畫面（等候室、等其他人）
+  function sheet(html, onclick = null) {
+    const ov = $('#overlay');
+    ov.innerHTML = `<div class="sheet">${html}</div>`;
+    ov.onclick = onclick;
+    ov.hidden = false;
+  }
+  function show(state, fresh) {
+    game = MJ.net.view(state, fresh);
+    S.setGame(game);
+  }
+
+  async function playNet() {
+    const cleanName = s => s.replace(/[<>&"']/g, '').trim().slice(0, 8);
+    const v = await dialog(
+      '<h1>連線對戰</h1><p>同一個 Wi-Fi 的人都能加入同一桌，空位由電腦補上。</p>' +
+      `<p><label>名字　<input id="name" maxlength="8" value="${cleanName(localStorage.mjName || '')}"></label></p>` +
+      '<div class="btns"><button class="btn win" data-v="join">加入</button><button class="btn" data-v="back">返回</button></div>');
+    if (v !== 'join') return '';
+    const name = localStorage.mjName = cleanName($('#name').value) || '玩家';
+
+    return new Promise(done => {
+      const leave = html => {
+        MJ.net.close();
+        pending = null;
+        refresh();
+        $('#overlay').hidden = true;
+        done(html);
+      };
+      MJ.net.open(name, async m => {
+        if (m.t === 'lobby') {
+          const host = m.host === m.me, links = MJ.net.links(m.urls);
+          S.idle = true;
+          sheet('<h1>等候室</h1>' +
+            (links.length ? `<p>請其他人用瀏覽器打開 ${links.map(u => `<b>${u}</b>`).join(' 或 ')}</p>` : '') +
+            `<table>${m.seats.map((n, i) => `<tr><td>${n || '電腦'}</td><td>${i === m.me ? '你' : ''}${i === m.host ? '　房主' : ''}</td></tr>`).join('')}</table>` +
+            (host ? '' : '<p>等房主開始…</p>') + '<div class="btns">' +
+            (host ? '<button class="btn win" data-v="1">打一圈</button><button class="btn" data-v="4">打四圈（一將）</button>' : '') +
+            '<button class="btn" data-v="leave">離開</button></div>',
+          e => {
+            const b = e.target.closest('button[data-v]');
+            if (!b) return;
+            if (b.dataset.v === 'leave') leave('');
+            else MJ.net.send({ t: 'start', rounds: Number(b.dataset.v) });
+          });
+        } else if (m.t === 'event') {
+          show(m.state, m.type === 'deal');
+          if (m.type === 'deal') { $('#overlay').hidden = true; $('#hud').hidden = false; }
+          // 喊牌語音平常掛在 Game 的事件上；連線時牌局在主機，這裡自己喊
+          if (m.type === 'call' && S.say) S.say(m.d.text, m.d.pid);
+          await ui.emit(m.type, m.d);
+        } else if (m.t === 'ask') {
+          pending = { kind: m.kind, o: m.o, tile: m.tile, from: m.from, secs: m.secs, seq: m.seq,
+            resolve: act => MJ.net.send({ t: 'answer', seq: m.seq, act }) };
+          selected = -1;
+          refresh();
+        } else if (m.t === 'cancel') {
+          // 逾時或已由電腦代答
+          if (pending && pending.seq === m.seq) { pending = null; selected = -1; refresh(); }
+        } else if (m.t === 'result') {
+          show(m.state);
+          refresh();
+          // 不擋住後面的訊息：主機等太久會直接發下一局
+          showResult(m.r).then(() => { MJ.net.send({ t: 'next' }); sheet('<p>等其他人按下一局…</p>'); });
+        } else if (m.t === 'over') {
+          show(m.state);
+          refresh();
+          S.idle = true;
+          await dialog(`${rankHtml()}<div class="btns"><button class="btn win" data-v="ok">回等候室</button></div>`);
+        } else if (m.t === 'sync') {
+          // 牌局中重新連上
+          show(m.state, true);
+          $('#overlay').hidden = true;
+          $('#hud').hidden = false;
+          S.idle = false; S.reveal = null; S.mark = false;
+          pending = null;
+          refresh();
+          S.settle();
+        } else if (m.t === 'full') {
+          leave(`<p>${m.busy ? '牌桌都被佔滿了' : m.playing ? '這一桌已經開打' : '這一桌滿了'}，晚點再試。</p>`);
+        }
+      });
+    });
   }
 
   async function main() {
     S.init($('#stage'));
-    let rounds = Number(await showStart());
+    const lan = await MJ.net.available();
+    let extra = '';
     for (;;) {
+      const v = await showStart(extra, lan);
       S.audio();
-      game = new MJ.Game({ names: ['你', '阿明', '美玲', '老陳'], agents: [human, MJ.ai, MJ.ai, MJ.ai], ui, rounds });
-      S.setGame(game);
-      $('#hud').hidden = false;
-      while (!game.over) {
-        const r = await game.playHand();
-        refresh();
-        await showResult(r);
-        game.advance(r);
-      }
-      const rank = game.players.slice().sort((a, b) => b.score - a.score);
-      const rows = rank.map((p, i) =>
-        `<tr><td>第 ${i + 1} 名</td><td>${p.name}</td><td class="n ${p.score > 0 ? 'plus' : p.score < 0 ? 'minus' : ''}">${signed(p.score)}</td></tr>`).join('');
-      rounds = Number(await showStart(`<h1>牌局結束</h1><table>${rows}</table><p>&nbsp;</p>`));
+      extra = v === 'net' ? await playNet() : await playLocal(Number(v));
     }
   }
 
