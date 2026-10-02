@@ -268,10 +268,10 @@
       };
       MJ.net.open(name, async m => {
         if (m.t === 'lobby') {
-          const host = m.host === m.me;
+          const host = m.host === m.me, links = MJ.net.links(m.urls);
           S.idle = true;
           sheet('<h1>等候室</h1>' +
-            (m.urls.length ? `<p>請其他人用瀏覽器打開 ${m.urls.map(u => `<b>${u}</b>`).join(' 或 ')}</p>` : '') +
+            (links.length ? `<p>請其他人用瀏覽器打開 ${links.map(u => `<b>${u}</b>`).join(' 或 ')}</p>` : '') +
             `<table>${m.seats.map((n, i) => `<tr><td>${n || '電腦'}</td><td>${i === m.me ? '你' : ''}${i === m.host ? '　房主' : ''}</td></tr>`).join('')}</table>` +
             (host ? '' : '<p>等房主開始…</p>') + '<div class="btns">' +
             (host ? '<button class="btn win" data-v="1">打一圈</button><button class="btn" data-v="4">打四圈（一將）</button>' : '') +
@@ -314,7 +314,7 @@
           refresh();
           S.settle();
         } else if (m.t === 'full') {
-          leave(`<p>${m.playing ? '這一桌已經開打' : '這一桌滿了'}，晚點再試。</p>`);
+          leave(`<p>${m.busy ? '牌桌都被佔滿了' : m.playing ? '這一桌已經開打' : '這一桌滿了'}，晚點再試。</p>`);
         }
       });
     });

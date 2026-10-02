@@ -1,0 +1,11 @@
+{
+  "name": "taiwan-mahjong",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/sim.js && node test/lan.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

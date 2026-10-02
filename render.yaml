@@ -1,6 +1,8 @@
 services:
   - type: web
-    name: taiwan-mahjong
-    runtime: static
-    buildCommand: ""
-    staticPublishPath: .
+    name: taiwan-mahjong-server
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/ping

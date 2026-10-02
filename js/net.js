@@ -82,7 +82,16 @@
     };
   }
 
-  const room = () => new URLSearchParams(location.search).get('room') || 'lan';
+  // 區域網路上只有一桌；放在網路上時每桌一個代碼，寫進網址好分享給朋友
+  const LOCAL = /^(localhost$|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+  function room() {
+    const q = new URLSearchParams(location.search);
+    if (!q.get('room') && !LOCAL.test(location.hostname)) {
+      q.set('room', Math.random().toString(36).slice(2, 7));
+      history.replaceState(null, '', '?' + q);
+    }
+    return q.get('room') || 'lan';
+  }
   let es = null, id = null;
 
   MJ.net = {
@@ -100,6 +109,8 @@
         chain = chain.then(() => es === mine && handle(m)).catch(err => console.error(err));
       };
     },
+    // 給其他人加入用的網址：在主機本機上看時用主機報的區域網路位址，其餘就是目前這個網址
+    links: urls => (/^(localhost$|127\.)/.test(location.hostname) ? urls : [location.href]),
     send(msg) {
       fetch('api/send', { method: 'POST', body: JSON.stringify({ room: room(), id, msg }) });
     },

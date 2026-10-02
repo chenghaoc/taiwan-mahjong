@@ -35,7 +35,8 @@ function legal(p, act, hand) {
 }
 
 class Room {
-  constructor() {
+  constructor(key) {
+    this.key = key;
     this.seats = [null, null, null, null]; // { id, name, res, bot, pending, gone }
     this.game = null;
     this.seq = 0;
@@ -78,8 +79,13 @@ class Room {
     if (i < 0) return;
     const s = this.seats[i];
     s.res = null;
-    if (!this.game) { this.seats[i] = null; this.lobby(); return; }
+    if (!this.game) { this.seats[i] = null; this.lobby(); this.tidy(); return; }
     s.gone = setTimeout(() => this.botify(i), GONE_MS);
+  }
+
+  // 沒人的牌桌收掉
+  tidy() {
+    if (!this.game && !this.seats.some(Boolean)) rooms.delete(this.key);
   }
 
   // 斷線太久：這一家改由電腦代打；真人全走光就收掉牌局
@@ -129,6 +135,7 @@ class Room {
       for (const s of this.seats) if (s) clearTimeout(s.gone);
       this.seats = this.seats.map(s => (s && s.res ? s : null));
       this.lobby();
+      this.tidy();
     }
   }
 
@@ -223,9 +230,11 @@ class Room {
 
 // ---- HTTP ----
 const rooms = new Map();
+const MAX_ROOMS = 200;
+const roomKey = key => String(key || 'lan').slice(0, 20);
 function room(key) {
-  key = String(key || 'lan').slice(0, 20);
-  if (!rooms.has(key)) rooms.set(key, new Room());
+  key = roomKey(key);
+  if (!rooms.has(key) && rooms.size < MAX_ROOMS) rooms.set(key, new Room(key));
   return rooms.get(key);
 }
 const cleanName = s => String(s || '').replace(/[<>&"']/g, '').trim().slice(0, 8) || '玩家';
@@ -237,8 +246,10 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"mahjong":true}');
   } else if (url.pathname === '/api/events') {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    // X-Accel-Buffering：請代理伺服器不要把訊息攢著不送
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const r = room(q.get('room'));
+    if (!r) { res.end('data: {"t":"full","busy":true}\n\n'); return; }
     req.on('close', () => r.drop(res));
     r.connect(String(q.get('id')), cleanName(q.get('name')), res);
   } else if (url.pathname === '/api/send' && req.method === 'POST') {
@@ -247,7 +258,8 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const m = JSON.parse(body);
-        room(m.room).receive(String(m.id), m.msg);
+        const r = rooms.get(roomKey(m.room));
+        if (r) r.receive(String(m.id), m.msg);
       } catch (e) { /* 壞掉的訊息直接丟掉 */ }
       res.writeHead(204);
       res.end();
