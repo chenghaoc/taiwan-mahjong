@@ -41,6 +41,9 @@
   const tiles = [], byKind = [], dice = [];
   const raycaster = new T.Raycaster(), mouse = new T.Vector2();
   let hover = -1, marker, plateCtx, plateTex, sparks, sparkLife = 0;
+  // 蓄力甩牌：按住自己的牌不放，力道在 0 和 1 之間來回擺盪，放開就打出去
+  const CHARGE_DELAY = 170, CHARGE_MS = 900;
+  let charge = null, meter = null;
   const sparkVel = [], rings = [];
   const cam = { yaw: 0, zoom: 1, yawTo: 0, zoomTo: 1, fit: 1, shake: 0 };
 
@@ -227,27 +230,57 @@
   }
 
   // 把一張牌交給物理引擎丟向它的位置；落定後再由動畫推正
+  // pw：甩牌的力道，沒蓄力的一般出牌當作 0.35
   function launch(t, now) {
+    const pw = t.tw.power == null ? 0.35 : t.tw.power, hard = Math.max(0, pw - 0.35);
     const g = t.g, b = new C.Body({ mass: 1, shape: tileShape, collisionFilterGroup: G_TILE, collisionFilterMask: G_GROUND });
     b.position.set(g.position.x, g.position.y, g.position.z);
     b.quaternion.set(g.quaternion.x, g.quaternion.y, g.quaternion.z, g.quaternion.w);
     b.linearDamping = 0.15; b.angularDamping = 0.35;
     // 落點抓在目標前面一點，留一段滑行
-    const dx = t.pos.x - g.position.x, dz = t.pos.z - g.position.z, len = Math.hypot(dx, dz) || 1, tf = 0.42;
-    const tx = t.pos.x - dx / len * 1.6, tz = t.pos.z - dz / len * 1.6;
+    // 越用力飛得越快，落點也抓得越前面，留給它滑
+    const dx = t.pos.x - g.position.x, dz = t.pos.z - g.position.z, len = Math.hypot(dx, dz) || 1, tf = 0.5 - 0.23 * pw;
+    const short = Math.min(len * 0.5, 1.6 + 5 * hard);
+    const tx = t.pos.x - dx / len * short, tz = t.pos.z - dz / len * short;
     b.velocity.set((tx - g.position.x) / tf, (1.2 - g.position.y) / tf + 0.5 * 260 * tf, (tz - g.position.z) / tf);
-    const flip = new T.Vector3(1, 0, 0).applyQuaternion(g.quaternion).multiplyScalar(rnd(8, 13) * (Math.random() < 0.5 ? -1 : 1));
+    const flip = new T.Vector3(1, 0, 0).applyQuaternion(g.quaternion).multiplyScalar(rnd(8, 13) * (0.5 + 1.43 * pw) * (Math.random() < 0.5 ? -1 : 1));
     b.angularVelocity.set(flip.x + rnd(-2, 2), flip.y + rnd(-3, 3), flip.z + rnd(-2, 2));
-    const p = t.phys = { b, until: now + tf * 1000 + 420, hit: false };
+    const p = t.phys = { b, until: now + tf * 1000 + 420 + 600 * hard, hit: false, pw, kick: 0 };
     b.addEventListener('collide', () => {
       if (p.hit) return;
       p.hit = true;
-      ring(b.position);
-      sfx('discard', 0.9, () => clack(0.9));
+      ring(b.position, pw > 0.75);
+      sfx('discard', 0.6 + 0.85 * pw, () => clack(0.6 + 0.85 * pw));
+      // 用力拍下去：牌彈起來、桌子一震、旁邊的牌跟著跳
+      if (pw > 0.55) {
+        p.kick = 16 + 55 * (pw - 0.55);
+        tone(70, 0.3, 0.6 * pw);
+        cam.shake = Math.max(cam.shake, (pw - 0.5) * 1.6);
+        jolt(b.position, pw);
+      }
     });
     world.addBody(b);
     t.tw = null;
   }
+  // 拍桌的震波：附近桌面上的牌由近到遠依序跳一下
+  function jolt(pos, pw) {
+    const now = performance.now(), R = 26;
+    for (const t of tiles) {
+      if (t.tw || t.phys || !['discard', 'meld', 'flower'].includes(t.zone)) continue;
+      const d = Math.hypot(t.pos.x - pos.x, t.pos.z - pos.z);
+      if (d < 0.5 || d > R) continue;
+      t.bounce = now + d * 6;
+      t.bounceAmp = (pw - 0.45) * 2.4 * (1 - d / R);
+    }
+  }
+  function endCharge(reset) {
+    if (!charge) return;
+    const t = myTile(charge.idx);
+    if (reset && t && !t.tw && !t.phys) t.g.position.copy(t.pos);
+    charge = null;
+    if (meter) meter.hidden = true;
+  }
+  const myTile = idx => tiles.find(t => t.zone === 'hand' && t.owner === 0 && t.idx === idx);
   function endPhys(t) {
     world.removeBody(t.phys.b);
     t.phys = null;
@@ -755,10 +788,24 @@
       if (idx !== hover) { hover = idx; if (game) S.sync(); }
     });
     canvas.addEventListener('pointerleave', () => { if (hover !== -1) { hover = -1; if (game) S.sync(); } });
-    canvas.addEventListener('click', e => {
+    // 快點一下照舊（選取、再點一次打出）；按住不放就是蓄力，放開把那張甩出去
+    meter = document.getElementById('power');
+    canvas.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || charge) return;
       const idx = pick(e);
-      if (idx >= 0 && S.onPick) S.onPick(idx);
+      if (idx < 0) return;
+      charge = { idx, id: e.pointerId, t0: performance.now(), p: 0, live: false };
+      canvas.setPointerCapture(e.pointerId);
     });
+    canvas.addEventListener('pointerup', e => {
+      const c = charge;
+      if (!c || c.id !== e.pointerId) return;
+      const fire = S.pickable && !!S.onPick;
+      endCharge(!(fire && c.live));
+      if (fire) S.onPick(c.idx, c.live ? c.p : null);
+    });
+    canvas.addEventListener('pointercancel', () => endCharge(true));
+    canvas.addEventListener('contextmenu', e => { if (charge) e.preventDefault(); });
     window.addEventListener('resize', resize);
     resize();
     drawPlate();
@@ -914,7 +961,7 @@
     const k = S.reduced ? 0.4 : 1, pre = S.reduced ? 0 : o.pre || 0;
     const grab = pre && o.grab ? o.grab : 0;
     t.tw = {
-      s0, pre, grab, phys: !!o.phys && !S.reduced,
+      s0, pre, grab, phys: !!o.phys && !S.reduced, power: o.power == null ? null : o.power,
       p0: t.g.position.clone(), q0: t.g.quaternion.clone(),
       t0: performance.now() + (o.delay || 0) * k + pre,
       dur: o.dur * k, arc: (o.arc || 0) * k, spin: S.reduced ? 0 : o.spin || 0, land: o.land || false,
@@ -928,7 +975,9 @@
     // 別家出牌：手先伸過去捏住，從手牌裡抽起來，再甩出去（手還沒載好就只有牌自己動）
     if (to === 'discard' && from !== 'discard') {
       const hand = other && hands[slot.owner];
-      return { phys: true, dur: 300, arc: 4, land: true, pre: hand ? 560 : other ? 240 : 0, grab: hand ? 340 : 0 };
+      let power = null;
+      if (!other && S.throwPower != null) { power = S.throwPower; S.throwPower = null; }
+      return { phys: true, dur: 300, arc: 4, land: true, pre: hand ? 560 : other ? 240 : 0, grab: hand ? 340 : 0, power };
     }
     // 吃碰槓：被叫的那張貼著桌面滑過去，手裡的牌翻開跟上
     if (to === 'meld' && from === 'discard') return { dur: 430, arc: 1, land: true, pre: 150 };
@@ -1433,6 +1482,12 @@
       if (t.phys) {
         // 物理接手中：照抄剛體的位置，時間到了再推正
         const p = t.phys;
+        if (p.kick) {
+          p.b.velocity.y = p.kick;
+          p.b.angularVelocity.x += rnd(-9, 9) * p.pw;
+          p.b.angularVelocity.z += rnd(-9, 9) * p.pw;
+          p.kick = 0;
+        }
         g.position.set(p.b.position.x, p.b.position.y, p.b.position.z);
         g.quaternion.set(p.b.quaternion.x, p.b.quaternion.y, p.b.quaternion.z, p.b.quaternion.w);
         g.scale.setScalar(g.scale.x + (1 - g.scale.x) * 0.25);
@@ -1469,8 +1524,28 @@
       } else if (t.bounce) {
         // 落桌後輕彈一下
         const b = (now - t.bounce) / 170;
-        if (b >= 1) { t.bounce = 0; g.position.copy(t.pos); }
-        else g.position.y = t.pos.y + 0.55 * Math.sin(Math.PI * b) * (1 - b);
+        if (b >= 1) { t.bounce = 0; t.bounceAmp = 0; g.position.copy(t.pos); }
+        else if (b > 0) g.position.y = t.pos.y + (t.bounceAmp || 0.55) * Math.sin(Math.PI * b) * (1 - b);
+      }
+    }
+
+    // 蓄力中：牌提起來越抖越兇，上方顯示力道條
+    if (charge) {
+      const held = now - charge.t0, t = myTile(charge.idx);
+      charge.live = held > CHARGE_DELAY && S.pickable && !!t;
+      if (charge.live) {
+        const u = ((held - CHARGE_DELAY) / CHARGE_MS) % 2, p = charge.p = u < 1 ? u : 2 - u;
+        if (!t.tw && !t.phys) {
+          const shake = 0.35 * p * p;
+          t.g.position.set(t.pos.x + rnd(-shake, shake), t.pos.y + 0.8 + 1.8 * p, t.pos.z + rnd(-shake, shake));
+        }
+        const s = toScreen(vTmp.set(t.pos.x, 9, ROW - 2));
+        meter.style.left = s.x + 'px';
+        meter.style.top = s.y + 'px';
+        meter.style.setProperty('--p', (p * 100).toFixed(1) + '%');
+        meter.style.setProperty('--c', `hsl(${Math.round(120 - 120 * p)} 85% 55%)`);
+        meter.classList.toggle('max', p > 0.9);
+        meter.hidden = false;
       }
     }
 

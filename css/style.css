@@ -224,3 +224,15 @@ body {
 @media (prefers-reduced-motion: reduce) {
   #shout, #tai tr { animation: none; }
 }
+
+/* 蓄力甩牌的力道條 */
+#power {
+  position: absolute; width: calc(var(--u) * 1.1); height: calc(var(--u) * 7);
+  transform: translate(-50%, -100%);
+  border: 2px solid rgba(255, 255, 255, 0.75); border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45); overflow: hidden; pointer-events: none;
+}
+#power i { position: absolute; left: 0; right: 0; bottom: 0; height: var(--p, 0%); background: var(--c, #6c6); }
+#power.max { box-shadow: 0 0 calc(var(--u) * 1.2) hsl(0 90% 60%); animation: power-buzz 0.08s infinite alternate; }
+@keyframes power-buzz { to { transform: translate(-46%, -100%); } }
+#stage { touch-action: none; }

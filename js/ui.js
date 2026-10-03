@@ -66,7 +66,7 @@
     }
     if (pending && pending.kind === 'turn') {
       if (selected < 0) {
-        return '<span>輪到你了。點一張牌選取，再點一次打出。</span>' +
+        return '<span>輪到你了。點一張牌選取，再點一次打出；按住不放可以蓄力甩出去。</span>' +
           (prefs.tips ? '<span class="dim">牌上的數字是打掉它之後的進張數</span>' : '');
       }
       const k = me.hand[selected], name = MJ.tileName(k);
@@ -183,10 +183,13 @@
     else if (a === 'ankong' || a === 'addkong') answer({ type: a, tile: Number(btn.dataset.tile) });
     else answer({ type: a });
   });
-  S.onPick = idx => {
+  // power：按住蓄力後放開的力道（0–1）；快點一下是 null，照舊先選再打
+  S.onPick = (idx, power) => {
     if (!pending || pending.kind !== 'turn') return;
-    if (idx === selected) answer({ type: 'discard', tile: game.players[0].hand[idx] });
-    else { selected = idx; refresh(); }
+    if (power != null || idx === selected) {
+      S.throwPower = power;
+      answer({ type: 'discard', tile: game.players[0].hand[idx] });
+    } else { selected = idx; refresh(); }
   };
 
   const ui = {
