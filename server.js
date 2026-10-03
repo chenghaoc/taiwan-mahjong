@@ -5,10 +5,7 @@ const http = require('http'), fs = require('fs'), path = require('path'), os = r
 require('./js/rules.js');
 require('./js/ai.js');
 require('./js/game.js');
-require('./js/mono/board.js');
-require('./js/mono/game.js');
-require('./js/mono/ai.js');
-const MJ = globalThis.MJ, MONO = globalThis.MONO;
+const MJ = globalThis.MJ;
 
 const PORT = Number(process.env.PORT) || 3000;
 const SPEED = process.env.MJ_SPEED === undefined ? 1 : Number(process.env.MJ_SPEED); // 測試用：0 就不等動畫
@@ -231,92 +228,13 @@ class Room {
   }
 }
 
-// ---- 大富翁：座位、斷線代打、等候室都跟麻將一樣，牌局換成 MONO.Game ----
-// 沒有藏起來的東西，每個人收到同一份狀態，座位不轉，用 me 告訴他是哪一家
-const MONO_DELAY = {
-  start: 1200, turn: 400, roll: 2200, pay: 700, buy: 900, card: 2300, jail: 1200, again: 600,
-  build: 500, sell: 500, mortgage: 500, unmortgage: 500, offer: 700, deal: 1300, bankrupt: 2200,
-};
-const MONO_ASK_MS = { turn: 60000, buy: 30000, deal: 25000, raise: 60000 }; // 逾時由電腦代為決定
-const monoDelay = (type, d) => (type === 'move' ? (d.jump ? 1000 : 300 + 230 * Math.abs(d.steps)) : MONO_DELAY[type] || 0);
-
-class MonoRoom extends Room {
-  receive(id, m) {
-    const i = this.seats.findIndex(s => s && s.id === id), s = this.seats[i];
-    if (!s || !m) return;
-    if (m.t === 'start') {
-      const rounds = [20, 40, 0].includes(m.rounds) ? m.rounds : 20;
-      if (!this.game && i === this.seats.findIndex(Boolean)) this.run(rounds).catch(e => console.error(e));
-    } else if (m.t === 'answer') {
-      const p = s.pending;
-      if (p && p.seq === m.seq && MONO.legal(p.kind, p.o, m.act)) p.done(m.act);
-    }
-  }
-
-  async run(rounds) {
-    let b = 0;
-    const game = this.game = new MONO.Game({
-      names: this.seats.map(s => (s ? s.name : BOTS[b++])),
-      agents: this.seats.map((s, i) => (s ? this.agent(i) : MONO.ai)),
-      ui: { emit: (type, d) => this.emit(type, d) },
-      rounds,
-    });
-    this.aborted = false;
-    try {
-      const res = await game.play();
-      this.seats.forEach((s, i) => this.send(s, { t: 'over', res, state: this.view(i) }));
-    } catch (e) {
-      if (e !== ABORT) throw e;
-    } finally {
-      this.game = null;
-      for (const s of this.seats) if (s) clearTimeout(s.gone);
-      this.seats = this.seats.map(s => (s && s.res ? s : null));
-      this.lobby();
-      this.tidy();
-    }
-  }
-
-  view(i) { return Object.assign(this.game.snapshot(), { me: i }); }
-
-  async emit(type, d) {
-    if (this.aborted) throw ABORT;
-    this.seats.forEach((s, i) => this.send(s, { t: 'event', type, d, state: this.view(i) }));
-    await sleep(monoDelay(type, d));
-  }
-
-  agent(i) {
-    const ask = kind => (g, pid, o) => this.ask(i, kind, o);
-    return { isHuman: true, turn: ask('turn'), buy: ask('buy'), deal: ask('deal'), raise: ask('raise') };
-  }
-
-  ask(i, kind, o) {
-    const s = this.seats[i];
-    const auto = () => MONO.ai[kind](this.game, i, o);
-    if (s.bot) return auto();
-    return new Promise(resolve => {
-      const seq = ++this.seq;
-      const done = act => {
-        clearTimeout(timer);
-        s.pending = null;
-        this.send(s, { t: 'cancel', seq });
-        resolve(act);
-      };
-      const timer = setTimeout(() => done(auto()), MONO_ASK_MS[kind]);
-      const msg = { t: 'ask', seq, kind, o, secs: MONO_ASK_MS[kind] / 1000 };
-      s.pending = { seq, kind, o, msg, auto, done };
-      this.send(s, msg);
-    });
-  }
-}
-
 // ---- HTTP ----
 const rooms = new Map();
 const MAX_ROOMS = 200;
-// 麻將和大富翁的牌桌分開放；麻將沿用原本的代碼，舊的分享連結照樣能用
-const roomKey = (key, game) => (game === 'mono' ? 'mono:' : '') + String(key || 'lan').slice(0, 20);
-function room(key, game) {
-  key = roomKey(key, game);
-  if (!rooms.has(key) && rooms.size < MAX_ROOMS) rooms.set(key, game === 'mono' ? new MonoRoom(key) : new Room(key));
+const roomKey = key => String(key || 'lan').slice(0, 20);
+function room(key) {
+  key = roomKey(key);
+  if (!rooms.has(key) && rooms.size < MAX_ROOMS) rooms.set(key, new Room(key));
   return rooms.get(key);
 }
 const cleanName = s => String(s || '').replace(/[<>&"']/g, '').trim().slice(0, 8) || '玩家';
@@ -326,11 +244,11 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x'), q = url.searchParams;
   if (url.pathname === '/api/ping') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end('{"mahjong":true,"monopoly":true}');
+    res.end('{"mahjong":true}');
   } else if (url.pathname === '/api/events') {
     // X-Accel-Buffering：請代理伺服器不要把訊息攢著不送
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    const r = room(q.get('room'), q.get('game'));
+    const r = room(q.get('room'));
     if (!r) { res.end('data: {"t":"full","busy":true}\n\n'); return; }
     req.on('close', () => r.drop(res));
     r.connect(String(q.get('id')), cleanName(q.get('name')), res);
@@ -340,7 +258,7 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const m = JSON.parse(body);
-        const r = rooms.get(roomKey(m.room, m.game));
+        const r = rooms.get(roomKey(m.room));
         if (r) r.receive(String(m.id), m.msg);
       } catch (e) { /* 壞掉的訊息直接丟掉 */ }
       res.writeHead(204);
@@ -348,7 +266,7 @@ const server = http.createServer((req, res) => {
     });
   } else {
     const file = url.pathname === '/' ? '/index.html' : url.pathname;
-    if (!/^\/(index\.html|monopoly\.html|(css|js|audio|models)\/[\w./-]+)$/.test(file) || file.includes('..')) { res.writeHead(404); res.end(); return; }
+    if (!/^\/(index\.html|(css|js|audio|models)\/[\w./-]+)$/.test(file) || file.includes('..')) { res.writeHead(404); res.end(); return; }
     fs.readFile(path.join(__dirname, file), (err, buf) => {
       if (err) { res.writeHead(404); res.end(); return; }
       res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });

@@ -294,8 +294,7 @@
       '<p>底 100、每台 20，莊家連莊照連 N 拉 N 計算。</p>' +
       '<div class="btns"><button class="btn win" data-v="1">打一圈</button>' +
       '<button class="btn" data-v="4">打四圈（一將）</button>' +
-      (lan ? '<button class="btn" data-v="net">連線對戰</button>' : '') +
-      '<a class="btn" href="monopoly.html">大富翁</a></div>');
+      (lan ? '<button class="btn" data-v="net">連線對戰</button>' : '') + '</div>');
   }
 
   function rankHtml() {

@@ -236,4 +236,3 @@ body {
 #power.max { box-shadow: 0 0 calc(var(--u) * 1.2) hsl(0 90% 60%); animation: power-buzz 0.08s infinite alternate; }
 @keyframes power-buzz { to { transform: translate(-46%, -100%); } }
 #stage { touch-action: none; }
-.btn { text-decoration: none; }
