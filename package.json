@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node test/sim.js && node test/lan.js"
+    "test": "node test/sim.js && node test/lan.js && node test/mono-sim.js && node test/mono-lan.js"
   },
   "engines": {
     "node": ">=18"
