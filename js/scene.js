@@ -1253,13 +1253,14 @@
   }
 
   // ---- 對手的手 ----
-  // 三位對手各一隻右手：手掌是 WebXR 的 generic-hand 模型（單位公尺），袖子與手臂用圓柱接到畫面外的肩膀。
+  // 三位對手各兩隻浮在桌上的手：WebXR 的 generic-hand 模型（單位公尺），沒有手臂，手腕漸漸淡掉。
+  // 出牌用右手，左手擱在桌角。
   // 模型的關節全是平輩，載入後照手指重新串成父子，才能一節一節彎。
   // 模型沒載到（例如直接開檔案）就沒有手，牌照舊自己飛。
   const HAND_SCALE = 102;                   // 桌上一單位約 0.9 公分
-  const SLEEVES = [0, 0x2c4766, 0x7b3340, 0x3d4a3c];
-  const UPPER = 31, FORE = 30;              // 上臂、前臂長
-  const hands = [];
+  const GLOWS = [0, 0x3f8cff, 0xff4f78, 0xffb43a];   // 每一家手緣的光
+  const hands = [];                         // 各家的右手（出牌那隻）
+  const allHands = [];
   // 每節往掌心彎的角度：[放鬆, 捏牌]，依序是近節、中節、遠節
   const CURL = {
     index: [[0.2, 0.75], [0.3, 0.75], [0.15, 0.35]],
@@ -1267,21 +1268,43 @@
     ring: [[0.3, 1.25], [0.35, 1.2], [0.2, 0.6]],
     pinky: [[0.35, 1.35], [0.35, 1.2], [0.2, 0.6]],
   };
-  // 模型裡手指朝 -Y、掌心朝 -X、拇指在 -Z；轉成手指朝 -z、掌心朝下
-  const HAND_BASIS = new T.Quaternion().setFromRotationMatrix(
-    new T.Matrix4().makeBasis(new T.Vector3(0, 1, 0), new T.Vector3(0, 0, 1), new T.Vector3(1, 0, 0)));
-  const Q_HAND_REST = new T.Quaternion().setFromAxisAngle(Y, 0.45).multiply(rotX(-0.25));
-  const Q_HAND_GRAB = new T.Quaternion().setFromAxisAngle(Y, 0.1).multiply(rotX(-0.95));
+  // 模型裡手指朝 -Y、拇指在 -Z，右手掌心朝 -X、左手朝 +X；轉成手指朝 -z、掌心朝下。
+  // side：右手 1、左手 -1，左手的一切都是右手對 x 鏡射
+  const handBasis = side => new T.Quaternion().setFromRotationMatrix(
+    new T.Matrix4().makeBasis(new T.Vector3(0, side, 0), new T.Vector3(0, 0, 1), new T.Vector3(side, 0, 0)));
+  const handTurn = (side, yaw, pitch) => new T.Quaternion().setFromAxisAngle(Y, yaw * side).multiply(rotX(pitch));
+
+  // 瓷白的手：邊緣帶一圈各家顏色的光，手腕用網點淡出
+  function handMaterial(glow) {
+    const m = new T.MeshPhysicalMaterial({ color: 0xe4e1da, roughness: 0.38, clearcoat: 0.6, clearcoatRoughness: 0.35, envMapIntensity: 0.7 });
+    m.onBeforeCompile = sh => {
+      sh.uniforms.uGlow = { value: new T.Color(glow) };
+      sh.vertexShader = 'varying float vWrist;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvWrist = position.y;');
+      sh.fragmentShader = 'varying float vWrist;\nuniform vec3 uGlow;\n' + sh.fragmentShader.replace('#include <tonemapping_fragment>', `
+        float hFade = 1.0 - smoothstep(0.022, 0.07, vWrist);
+        if (hFade < fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))) discard;
+        float hRim = pow(1.0 - saturate(dot(normalize(vViewPosition), normal)), 2.2);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, uGlow, min(1.0, hRim * 0.8 + (1.0 - hFade) * 0.9));
+        #include <tonemapping_fragment>`);
+    };
+    return m;
+  }
 
   function buildHands() {
     if (!T.GLTFLoader) return;
-    const skin = new T.MeshStandardMaterial({ color: 0xd8a47f, roughness: 0.62, envMapIntensity: 0.35 });
     for (let pid = 1; pid < 4; pid++) {
-      new T.GLTFLoader().load('models/hand-right.glb', gltf => { hands[pid] = makeHand(pid, gltf.scene, skin); }, undefined, () => {});
+      const skin = handMaterial(GLOWS[pid]);
+      for (const side of [1, -1]) {
+        new T.GLTFLoader().load(side > 0 ? 'models/hand-right.glb' : 'models/hand-left.glb', gltf => {
+          const h = makeHand(pid, side, gltf.scene, skin);
+          allHands.push(h);
+          if (side > 0) hands[pid] = h;
+        }, undefined, () => {});
+      }
     }
   }
 
-  function makeHand(pid, model, skin) {
+  function makeHand(pid, side, model, skin) {
     const bone = {};
     model.updateMatrixWorld(true);
     model.traverse(o => {
@@ -1298,7 +1321,7 @@
       joints.push({ b, q0: b.quaternion.clone(), ax: axis.clone().applyQuaternion(wq(parent).invert()), bend });
       return b;
     };
-    const flex = new T.Vector3(0, 0, -1), none = [0, 0];
+    const flex = new T.Vector3(0, 0, -side), none = [0, 0];
     for (const f in CURL) {
       let p = hinge(f + '-finger-metacarpal', bone.wrist, flex, none);
       ['proximal', 'intermediate', 'distal'].forEach((seg, i) => { p = hinge(`${f}-finger-phalanx-${seg}`, p, flex, CURL[f][i]); });
@@ -1321,9 +1344,9 @@
 
     // 手腕放在原點
     const g = new T.Group(), fit = new T.Group();
-    fit.quaternion.copy(HAND_BASIS);
+    fit.quaternion.copy(handBasis(side));
     fit.scale.setScalar(HAND_SCALE);
-    fit.position.copy(wp(bone.wrist)).multiplyScalar(-HAND_SCALE).applyQuaternion(HAND_BASIS);
+    fit.position.copy(wp(bone.wrist)).multiplyScalar(-HAND_SCALE).applyQuaternion(fit.quaternion);
     fit.add(model);
     g.add(fit);
     // 捏牌時拇指與食指中指之間的那一點，相對手腕的位置
@@ -1332,60 +1355,25 @@
     const grip = pads().lerp(wp(bone['thumb-tip']), 0.5);
     pose(0);
 
-    // 袖子：前臂、手肘、上臂
-    const cloth = new T.MeshStandardMaterial({ color: SLEEVES[pid], roughness: 0.9, envMapIntensity: 0.2 });
-    const part = geo => {
-      const m = new T.Mesh(geo, cloth);
-      m.castShadow = true;
-      scene.add(m);
-      return m;
-    };
-    const fore = part(new T.CylinderGeometry(3.5, 4.3, 1, 20));
-    const upper = part(new T.CylinderGeometry(4.3, 5, 1, 20));
-    const elbow = part(new T.SphereGeometry(4.3, 20, 12));
-    const cuff = part(new T.SphereGeometry(3.7, 20, 12));
     scene.add(g);
 
-    // 休息時擱在自己右手邊的桌角，不壓到吃碰槓的牌
-    const rest = place(pid, 48, 3.2, 50, Q_STAND).pos;
+    // 休息時擱在自己這邊的桌緣，左右各一隻，離桌角遠一點免得跟鄰家的手疊在一起
+    const rest = place(pid, 40 * side, 3.6, 54, Q_STAND).pos;
     const h = {
-      pid, g, pose, grip, fore, upper, elbow, cuff, rest, p: rest.clone(), job: null,
-      shoulder: place(pid, 24, 27, 80, Q_STAND).pos,
-      // 手肘的方向：休息時垂在外下方，伸手拿牌時抬起來
-      pole0: new T.Vector3(0.75, -0.6, 0.25).applyQuaternion(seatQ[pid]),
-      pole1: new T.Vector3(0.65, 0.6, 0.2).applyQuaternion(seatQ[pid]),
+      pid, g, pose, grip, rest, p: rest.clone(), job: null, phase: pid * 2.1 + side,
+      qRest: handTurn(side, 0.45, -0.25), qGrab: handTurn(side, 0.1, -0.95),
     };
     setHand(h, 0);
     return h;
   }
 
-  const hQ = new T.Quaternion(), hA = new T.Vector3(), hB = new T.Vector3(), hC = new T.Vector3(), hS = new T.Vector3();
-  function limb(m, from, to) {
-    hC.subVectors(to, from);
-    const len = hC.length();
-    m.position.copy(from).addScaledVector(hC, 0.5);
-    m.scale.set(1, len, 1);
-    m.quaternion.setFromUnitVectors(Y, hC.divideScalar(len));
-  }
+  const hQ = new T.Quaternion(), hA = new T.Vector3();
   // 把捏點放到 h.p；c 從 0（放鬆）到 1（捏住）
   function setHand(h, c) {
     h.pose(c);
-    hQ.copy(Q_HAND_REST).slerp(Q_HAND_GRAB, c).premultiply(seatQ[h.pid]);
+    hQ.copy(h.qRest).slerp(h.qGrab, c).premultiply(seatQ[h.pid]);
     h.g.quaternion.copy(hQ);
-    const wrist = h.g.position.copy(h.p).sub(hA.copy(h.grip).applyQuaternion(hQ));
-    // 手臂：肩膀固定在椅子上方，搆不到就往前傾
-    hS.copy(h.shoulder);
-    let d = hS.distanceTo(wrist);
-    const max = UPPER + FORE - 1.5;
-    if (d > max) { hS.lerp(wrist, 1 - max / d); d = max; }
-    hA.subVectors(wrist, hS).divideScalar(d);
-    const a = (UPPER * UPPER - FORE * FORE + d * d) / (2 * d);
-    hB.copy(h.pole0).lerp(h.pole1, c);
-    hB.addScaledVector(hA, -hB.dot(hA)).normalize();
-    h.cuff.position.copy(wrist);
-    h.elbow.position.copy(hS).addScaledVector(hA, a).addScaledVector(hB, Math.sqrt(Math.max(0, UPPER * UPPER - a * a)));
-    limb(h.fore, h.elbow.position, wrist);
-    limb(h.upper, hS, h.elbow.position);
+    h.g.position.copy(h.p).sub(hA.copy(h.grip).applyQuaternion(hQ));
   }
 
   // 伸手去拿 t：tw.grab 毫秒內到位捏住，跟著牌提起，起飛時順勢往前一送再收回
@@ -1395,8 +1383,7 @@
     h.job = { t, from, at: from + t.tw.grab, lift, sent: lift + 170, back: lift + 170 + 480, p0: null, p1: new T.Vector3(), p2: null };
   }
   function moveHands(now) {
-    for (const h of hands) {
-      if (!h) continue;
+    for (const h of allHands) {
       const j = h.job;
       let c = 0;
       if (j && now >= j.from) {
@@ -1422,8 +1409,10 @@
           const k = smooth((now - j.sent) / (j.back - j.sent));
           h.p.lerpVectors(j.p2 || j.p1, h.rest, k);
           h.p.y += 10 * k * (1 - k);
-        } else { h.job = null; h.p.copy(h.rest); }
+        } else h.job = null;
       }
+      // 閒著的手隨呼吸輕輕起伏
+      if (!h.job) h.p.copy(h.rest).y += 0.35 * Math.sin(now / 900 + h.phase);
       setHand(h, c);
     }
   }
