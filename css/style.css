@@ -236,3 +236,21 @@ body {
 #power.max { box-shadow: 0 0 calc(var(--u) * 1.2) hsl(0 90% 60%); animation: power-buzz 0.08s infinite alternate; }
 @keyframes power-buzz { to { transform: translate(-46%, -100%); } }
 #stage { touch-action: none; }
+
+/* ---- 手把與鍵盤：金色游標、按鍵圖示，滑鼠游標藏起來 ---- */
+body.pad, body.pad #stage { cursor: none !important; }
+.pad-focus { outline: calc(var(--u) * 0.35) solid var(--gold) !important; outline-offset: calc(var(--u) * 0.25); }
+.sheet .pad-focus { background: rgba(227, 178, 60, 0.22); }
+.pad-btn {
+  display: inline-grid; place-items: center;
+  min-width: 1.6em; height: 1.6em; padding: 0 0.35em; margin: 0 0.25em;
+  border-radius: 999px;
+  background: var(--ivory); color: var(--ink);
+  font-family: var(--sans); font-size: 0.8em; font-weight: 700; line-height: 1;
+}
+.pad-btn.key { border-radius: 0.35em; }
+.pad-btn.xbox.b-A { background: #5bb04a; color: #fff; }
+.pad-btn.xbox.b-B { background: #d9443a; color: #fff; }
+.pad-btn.xbox.b-X { background: #3a7bd5; color: #fff; }
+.pad-btn.xbox.b-Y { background: #e3b23c; color: var(--ink); }
+.btn.win .pad-btn { background: var(--ink); color: var(--gold); }

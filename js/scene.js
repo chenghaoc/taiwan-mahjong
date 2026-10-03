@@ -280,7 +280,23 @@
     charge = null;
     if (meter) meter.hidden = true;
   }
-  const myTile = idx => tiles.find(t => t.zone === 'hand' && t.owner === 0 && t.idx === idx);
+  // 按下／放開一張手牌：滑鼠和手把共用，id 分辨是誰在按
+  S.press = (idx, id) => {
+    if (charge || !S.pickable) return false;
+    charge = { idx, id, t0: performance.now(), p: 0, live: false };
+    return true;
+  };
+  S.release = id => {
+    const c = charge;
+    if (!c || c.id !== id) return;
+    const fire = S.pickable && !!S.onPick;
+    endCharge(!(fire && c.live));
+    if (fire) S.onPick(c.idx, c.live ? c.p : null);
+  };
+  S.cancelPress = () => endCharge(true);
+  // 蓄力中的力道（0–1），沒在蓄力是 null；手把拿來震動
+  S.chargePower = () => (charge && charge.live ? charge.p : null);
+  const myTile =idx => tiles.find(t => t.zone === 'hand' && t.owner === 0 && t.idx === idx);
   function endPhys(t) {
     world.removeBody(t.phys.b);
     t.phys = null;
@@ -791,19 +807,11 @@
     // 快點一下照舊（選取、再點一次打出）；按住不放就是蓄力，放開把那張甩出去
     meter = document.getElementById('power');
     canvas.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || charge) return;
+      if (e.button !== 0) return;
       const idx = pick(e);
-      if (idx < 0) return;
-      charge = { idx, id: e.pointerId, t0: performance.now(), p: 0, live: false };
-      canvas.setPointerCapture(e.pointerId);
+      if (idx >= 0 && S.press(idx, e.pointerId)) canvas.setPointerCapture(e.pointerId);
     });
-    canvas.addEventListener('pointerup', e => {
-      const c = charge;
-      if (!c || c.id !== e.pointerId) return;
-      const fire = S.pickable && !!S.onPick;
-      endCharge(!(fire && c.live));
-      if (fire) S.onPick(c.idx, c.live ? c.p : null);
-    });
+    canvas.addEventListener('pointerup', e => S.release(e.pointerId));
     canvas.addEventListener('pointercancel', () => endCharge(true));
     canvas.addEventListener('contextmenu', e => { if (charge) e.preventDefault(); });
     window.addEventListener('resize', resize);

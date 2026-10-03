@@ -8,6 +8,9 @@
   const ROLE = ['', '下家', '對家', '上家'];
   const DELAY = { draw: 380, discard: 1150, call: 1100, flower: 650 };
   const signed = n => (n > 0 ? '+' + n : String(n));
+  // 用手把或鍵盤玩的時候，提示改成按鍵圖示
+  const padOn = () => !!MJ.pad && MJ.pad.on();
+  const key = b => (padOn() ? MJ.pad.glyph(b) : '');
 
   let game = null;
   let pending = null;   // 等真人決定：{kind:'turn'|'claim', o, tile, from, resolve}
@@ -62,9 +65,20 @@
     const need = 5 - me.melds.length;
     if (pending && pending.kind === 'claim') {
       return `<span>${game.players[pending.from].name}打出</span>${tile(pending.tile, 't-xs')}<span>，要嗎？` +
-        `${pending.secs ? `（${pending.secs} 秒內沒選算過）` : ''}</span>`;
+        `${pending.secs ? `（${pending.secs} 秒內沒選算過）` : ''}</span>` +
+        (padOn() ? `<span class="dim">${key('A')}選定　${key('B')}過</span>` : '');
     }
     if (pending && pending.kind === 'turn') {
+      if (padOn()) {
+        const tail = `<span class="dim">${key('LR')}選牌　${key('A')}打出　按住${key('A')}蓄力甩出去</span>`;
+        if (selected < 0) return '<span>輪到你了。</span>' + tail;
+        const k = me.hand[selected], c = MJ.toCounts(me.hand);
+        c[k]--;
+        const w = waitList(c, need);
+        if (w) return `<span>打出${MJ.tileName(k)}後聽</span>${w}` + tail;
+        const a = prefs.tips && analysis && analysis.find(x => x.k === k);
+        return `<span>${MJ.tileName(k)}${a ? `：${a.s} 向聽，有效進張 ${a.uke} 張` : ''}</span>` + tail;
+      }
       if (selected < 0) {
         return '<span>輪到你了。點一張牌選取，再點一次打出；按住不放可以蓄力甩出去。</span>' +
           (prefs.tips ? '<span class="dim">牌上的數字是打掉它之後的進張數</span>' : '');
@@ -104,18 +118,18 @@
     if (!pending) return '';
     const o = pending.o, b = [];
     if (pending.kind === 'turn') {
-      if (o.hu) b.push('<button class="btn win" data-act="hu">自摸</button>');
+      if (o.hu) b.push(`<button class="btn win" data-act="hu">${key('Y')}自摸</button>`);
       for (const k of o.ankong || []) b.push(`<button class="btn" data-act="ankong" data-tile="${k}">暗槓${tile(k)}</button>`);
       for (const k of o.addkong || []) b.push(`<button class="btn" data-act="addkong" data-tile="${k}">加槓${tile(k)}</button>`);
     } else {
-      if (o.hu) b.push('<button class="btn win" data-act="hu">胡</button>');
+      if (o.hu) b.push(`<button class="btn win" data-act="hu">${key('Y')}胡</button>`);
       if (o.kong) b.push('<button class="btn" data-act="kong">槓</button>');
       if (o.pong) b.push('<button class="btn" data-act="pong">碰</button>');
       (o.chi || []).forEach((pair, i) => {
         const three = pair.concat(pending.tile).sort((x, y) => x - y);
         b.push(`<button class="btn" data-act="chi" data-i="${i}">吃${three.map(t => tile(t)).join('')}</button>`);
       });
-      b.push('<button class="btn quiet" data-act="pass">過</button>');
+      b.push(`<button class="btn quiet" data-act="pass">${key('B')}過</button>`);
     }
     return b.join('');
   }
@@ -134,6 +148,14 @@
     renderTips();
   }
   S.onResize = renderTips;
+
+  // 給手把用：現在在等我做什麼、選了哪張
+  MJ.ui = {
+    refresh,
+    pending: () => pending,
+    selected: () => selected,
+    select(i) { if (pending && pending.kind === 'turn' && i !== selected) { selected = i; refresh(); } },
+  };
 
   function shout(pid, text) {
     const el = $('#shout'), p = S.screen(pid);
@@ -206,7 +228,7 @@
       refresh();
       if (type === 'call' || type === 'flower') shout(d.pid, d.text);
       if (type === 'call') S.say(d.text);
-      if (win) { S.celebrate(d.pid); await sleep(prefs.reduced ? 1500 : 3200); }
+      if (win) { S.celebrate(d.pid); if (MJ.pad) MJ.pad.rumble(d.pid === 0 ? 1 : 0.4, 600); await sleep(prefs.reduced ? 1500 : 3200); }
       else {
         if (type === 'call') S.focus(d.pid, 1000);
         // 自己摸牌不必等
