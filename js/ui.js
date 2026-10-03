@@ -13,19 +13,21 @@
   let pending = null;   // 等真人決定：{kind:'turn'|'claim', o, tile, from, resolve}
   let selected = -1;
   let analysis = null;  // 輪到我時，每種牌打掉後的向聽數與進張
+  let risk = null;      // 防守：手上每種牌的放槍風險（有人可能聽牌時才有）
 
   // ---- 偏好設定（存在瀏覽器裡）----
-  const prefs = { muted: false, tips: true, reduced: window.matchMedia('(prefers-reduced-motion: reduce)').matches };
+  const prefs = { muted: false, tips: true, guard: true, reduced: window.matchMedia('(prefers-reduced-motion: reduce)').matches };
   try { Object.assign(prefs, JSON.parse(localStorage.getItem('mj-prefs') || '{}')); } catch (e) { /* 沒有儲存空間就用預設 */ }
   function applyPrefs() {
     S.muted = prefs.muted;
     S.reduced = prefs.reduced;
     $('#mute').textContent = prefs.muted ? '音效：關' : '音效：開';
     $('#tips-toggle').textContent = prefs.tips ? '提示：開' : '提示：關';
+    $('#guard').textContent = prefs.guard ? '防守：開' : '防守：關';
     $('#motion').textContent = prefs.reduced ? '動畫：精簡' : '動畫：完整';
     try { localStorage.setItem('mj-prefs', JSON.stringify(prefs)); } catch (e) { /* 同上 */ }
   }
-  for (const [id, key] of [['#mute', 'muted'], ['#tips-toggle', 'tips'], ['#motion', 'reduced']]) {
+  for (const [id, key] of [['#mute', 'muted'], ['#tips-toggle', 'tips'], ['#guard', 'guard'], ['#motion', 'reduced']]) {
     $(id).addEventListener('click', () => { prefs[key] = !prefs[key]; applyPrefs(); refresh(); });
   }
 
@@ -37,13 +39,22 @@
     else ts = [0, 1, 2, 3].map(() => tile(m.tile));
     return `<span class="group">${ts.join('')}</span>`;
   }
+  const LEVEL = ['安全', '稍危', '危險', '很危險'];
+  // 有人看起來快聽牌才算風險，開局大家都還早，標了只是雜訊
+  function guard() {
+    if (!prefs.guard) return null;
+    const d = MJ.ai.danger(game, 0);
+    return Math.max(...d.threat) >= 0.3 ? d : null;
+  }
   function whoHtml(pid) {
     const p = game.players[pid];
+    const hot = risk && risk.threat[pid] >= 0.6;
     return `<div class="who${game.turn === pid ? ' active' : ''}">` +
       `<span class="wind">${MJ.WIND[game.seatWind(pid)]}</span>` +
       (ROLE[pid] ? `<span class="role">${ROLE[pid]}</span>` : '') +
       `<span class="name">${p.name}</span>` +
       (game.dealer === pid ? `<span class="dealer">莊${game.streak ? '・連' + game.streak : ''}</span>` : '') +
+      (hot ? '<span class="threat">要小心</span>' : '') +
       `<span class="score">${signed(p.score)}</span></div>`;
   }
 
@@ -67,17 +78,21 @@
     if (pending && pending.kind === 'turn') {
       if (selected < 0) {
         return '<span>輪到你了。點一張牌選取，再點一次打出；按住不放可以蓄力甩出去。</span>' +
-          (prefs.tips ? '<span class="dim">牌上的數字是打掉它之後的進張數</span>' : '');
+          (prefs.tips ? '<span class="dim">牌上的數字是打掉它之後的進張數</span>' : '') +
+          (risk ? '<span class="dim">色條是放槍風險：綠安全、紅危險</span>' : '');
       }
       const k = me.hand[selected], name = MJ.tileName(k);
       const c = MJ.toCounts(me.hand);
       c[k]--;
+      const r = risk && risk.tiles.find(x => x.k === k);
+      const why = r ? `<span class="risk-why lv${r.level}">${LEVEL[r.level]}` +
+        (r.level ? `：${game.players[r.foe].name}可能在等` : '') + (r.why ? `（${r.why}）` : '') + '</span>' : '';
       const w = waitList(c, need);
-      if (w) return `<span>打出${name}後聽</span>${w}`;
+      if (w) return `<span>打出${name}後聽</span>${w}${why}`;
       const a = prefs.tips && analysis && analysis.find(x => x.k === k);
-      return a
+      return (a
         ? `<span>打出${name}：${a.s} 向聽，有效進張 ${a.uke} 張。再點一次打出。</span>`
-        : `<span>再點一次打出${name}</span>`;
+        : `<span>再點一次打出${name}</span>`) + why;
     }
     if (me.hand.length % 3 === 1) {
       const w = waitList(MJ.toCounts(me.hand), need);
@@ -86,17 +101,20 @@
     return '';
   }
 
-  // 每張手牌上方的進張數：只標向聽數最好的那些，其中進張最多的用金色
+  // 每張手牌上方：進張數（只標向聽數最好的那些，其中進張最多的用金色），再上面是放槍風險的色條
   function renderTips() {
     const box = $('#tips');
-    if (!game || !prefs.tips || !analysis || !pending || pending.kind !== 'turn') { box.innerHTML = ''; return; }
-    const min = Math.min(...analysis.map(a => a.s));
-    const top = Math.max(...analysis.filter(a => a.s === min).map(a => a.uke));
+    const tips = prefs.tips && analysis, mine = pending && pending.kind === 'turn';
+    if (!game || !mine || !(tips || risk)) { box.innerHTML = ''; return; }
+    const min = tips && Math.min(...analysis.map(a => a.s));
+    const top = tips && Math.max(...analysis.filter(a => a.s === min).map(a => a.uke));
     const pts = S.handPoints(), hand = game.players[0].hand;
     box.innerHTML = hand.map((k, i) => {
-      const a = analysis.find(x => x.k === k);
-      if (!a || a.s !== min || !pts[i]) return '';
-      return `<span class="tip${a.uke === top ? ' best' : ''}" style="left:${pts[i].x}px;top:${pts[i].y}px">${a.uke}</span>`;
+      if (!pts[i]) return '';
+      const a = tips && analysis.find(x => x.k === k), r = risk && risk.tiles.find(x => x.k === k);
+      const tip = a && a.s === min ? `<span class="tip${a.uke === top ? ' best' : ''}">${a.uke}</span>` : '';
+      const bar = r ? `<i class="risk lv${r.level}" title="${LEVEL[r.level]}"></i>` : '';
+      return tip || bar ? `<span class="mark" style="left:${pts[i].x}px;top:${pts[i].y}px">${bar}${tip}</span>` : '';
     }).join('');
   }
 
@@ -123,6 +141,7 @@
   // 名牌、按鈕、提示更新後，再讓 3D 牌桌跟上牌局
   function refresh() {
     if (!game) return;
+    risk = guard();
     for (let pid = 0; pid < 4; pid++) $('#who' + pid).innerHTML = whoHtml(pid);
     $('#actions').innerHTML = actionsHtml();
     const hint = hintHtml(game.players[0]);

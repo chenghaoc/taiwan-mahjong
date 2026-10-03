@@ -59,6 +59,32 @@ r = score('123m 456m 789m 123p 555z 22s', { win: '5z', seat: 1, flowers: [35, 34
 assert.strictEqual(names(r), '門清1,中1,花槓2,正花蘭1');
 console.log('規則測試通過');
 
+// 防守：放槍風險
+{
+  const g = Object.create(MJ.Game.prototype);
+  g.wall = new Array(16 + 40).fill(0);
+  const P = n => ({ hand: [], discards: [], melds: [], flowers: [], name: n });
+  g.players = [P('我'), P('甲'), P('乙'), P('丙')];
+  g.players[0].hand = tiles('145m 1z');
+  // 開局沒人有威脅：全部安全
+  let d = MJ.ai.danger(g, 0);
+  assert(d.tiles.every(x => x.level === 0));
+  // 甲吃碰了三組、打過四萬，東風已經出現三張
+  g.players[1].melds = [{ type: 'pong', tile: 31 }, { type: 'chi', tile: 9 }, { type: 'pong', tile: 20 }];
+  g.players[1].discards = tiles('4m 9s 9s 1z 1z 1z');
+  d = MJ.ai.danger(g, 0);
+  const at = k => d.tiles.find(x => x.k === tiles(k)[0]);
+  assert.strictEqual(at('4m').why, '現物');
+  assert.strictEqual(at('4m').level, 0);
+  assert.strictEqual(at('1m').why, '筋');
+  assert.strictEqual(at('1z').why, '絕張');
+  assert.strictEqual(at('1z').level, 0);
+  assert.strictEqual(at('5m').level, 3);
+  assert.strictEqual(at('5m').foe, 1);
+  assert(at('1m').d < at('5m').d);
+}
+console.log('防守測試通過');
+
 // 模擬
 (async () => {
   const GAMES = 300;
@@ -66,7 +92,15 @@ console.log('規則測試通過');
   const seen = {};
   const t0 = Date.now();
   for (let gi = 0; gi < GAMES; gi++) {
-    const game = new MJ.Game({ names: ['A', 'B', 'C', 'D'], agents: [MJ.ai, MJ.ai, MJ.ai, MJ.ai], rounds: 1 });
+    // 第一家每次出牌前都算一次放槍風險，確認整局各種局面都算得出來
+    const guarded = Object.assign({}, MJ.ai, {
+      turn(game, pid, o) {
+        const d = MJ.ai.danger(game, pid);
+        for (const x of d.tiles) assert(x.d >= 0 && x.d <= 1 && x.level >= 0 && x.level <= 3);
+        return MJ.ai.turn(game, pid, o);
+      },
+    });
+    const game = new MJ.Game({ names: ['A', 'B', 'C', 'D'], agents: [guarded, MJ.ai, MJ.ai, MJ.ai], rounds: 1 });
     while (!game.over) {
       const res = await game.playHand();
       hands++;

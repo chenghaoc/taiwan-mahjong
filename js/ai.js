@@ -63,9 +63,52 @@
     return best.k;
   }
 
+  // 防守：pid 打出每種手牌會放槍的風險。只看桌上看得到的：別家的牌河、副露、剩幾張牌。
+  // 每家的威脅（副露多、打得久、牌牆快沒了就越可能聽牌）乘上這張牌對他的風險，取最危險的那家。
+  // 回傳 {threat:[四家], tiles:[{k, d 0–1, level 0 安全–3 危險, foe, why}]}
+  function danger(game, pid) {
+    const u = unseen(game, pid), live = game.live();
+    const threat = game.players.map((p, j) => (j === pid ? 0 :
+      Math.min(1, 0.2 * p.melds.length + 0.035 * p.discards.length + Math.max(0, 24 - live) / 48)));
+    const risk = (j, k) => {
+      const ds = game.players[j].discards;
+      // 字牌外面一張都不剩，誰也胡不到
+      if (k >= 27 && u[k] <= 0) return [0, '絕張'];
+      // 台灣麻將沒有振聽，打過的牌還是可能胡，只是很少見
+      if (ds.includes(k)) return [0.05, '現物'];
+      if (k >= 27) {
+        return [[0, 0.15, 0.35, 0.6][Math.min(3, u[k])], u[k] === 3 ? '生張' : `外面剩 ${u[k]} 張`];
+      }
+      const r = k % 9;
+      let x = r === 0 || r === 8 ? 0.45 : r === 1 || r === 7 ? 0.6 : 0.8, why = r === 0 || r === 8 ? '么九' : '';
+      // 筋：差三的牌打過，兩面聽就聽不到這張（4、5、6 要兩邊都打過）
+      const lo = r >= 3 && ds.includes(k - 3), hi = r <= 5 && ds.includes(k + 3);
+      if ((r < 3 && hi) || (r > 5 && lo) || (lo && hi)) { x *= 0.5; why = '筋'; }
+      else if (lo || hi) { x *= 0.75; why = '半筋'; }
+      // 別人手上已經沒有這張，對子、刻子都不可能
+      if (u[k] <= 0) { x *= 0.6; why = '絕張'; }
+      return [x, why];
+    };
+    const kinds = [...new Set(game.players[pid].hand)];
+    return {
+      threat,
+      tiles: kinds.map(k => {
+        let best = { k, d: 0, foe: -1, why: '' };
+        for (let j = 0; j < 4; j++) {
+          if (j === pid || !threat[j]) continue;
+          const [x, why] = risk(j, k), d = threat[j] * x;
+          if (best.foe < 0 || d > best.d) best = { k, d, foe: j, why };
+        }
+        best.level = best.d < 0.1 ? 0 : best.d < 0.25 ? 1 : best.d < 0.45 ? 2 : 3;
+        return best;
+      }),
+    };
+  }
+
   MJ.ai = {
     unseen,
     analyze,
+    danger,
     turn(game, pid, o) {
       if (o.hu) return { type: 'hu' };
       const p = game.players[pid], need = 5 - p.melds.length;
