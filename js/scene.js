@@ -1304,11 +1304,17 @@
 
   // ---- 對手的手 ----
   // 三位對手各兩隻浮在桌上的手：WebXR 的 generic-hand 模型（單位公尺），沒有手臂，手腕漸漸淡掉。
+  // 每家的膚色、手的大小與粗細、皺紋、指甲和配件（手錶、玉鐲、金戒指）都不一樣。
   // 出牌用右手；沒輪到自己時兩隻手會換姿勢：擱桌緣、交握、指尖相抵、敲桌面、摸自己的牌、玩籌碼。
   // 模型的關節全是平輩，載入後照手指重新串成父子，才能一節一節彎。
   // 模型沒載到（例如直接開檔案）就沒有手，牌照舊自己飛。
   const HAND_SCALE = 102;                   // 桌上一單位約 0.9 公分
-  const GLOWS = [0, 0x3f8cff, 0xff4f78, 0xffb43a];   // 每一家手緣的光
+  // 三家各自的手：膚色、大小、手指粗細、老化（皺紋）、斑點、指甲顏色、配件（L/R 戴在哪隻手）
+  const LOOKS = [null,
+    { skin: 0xb27b58, size: 1.06, thick: 1.12, age: 0.35, blotch: 0.5, nail: 0xd8b4a2, polish: false, gear: { L: 'watch' } },   // 阿明
+    { skin: 0xf0c6a6, size: 0.9, thick: 0.86, age: 0.05, blotch: 0.2, nail: 0xa8102a, polish: true, gear: { L: 'bangle' } },   // 美玲
+    { skin: 0xa9765a, size: 1.0, thick: 0.98, age: 1, blotch: 1, nail: 0xcdb09c, polish: false, gear: { R: 'ring' } },          // 老陳
+  ];
   const hands = [];                         // 各家的右手（出牌那隻）
   const allHands = [];
   // 每節往掌心彎的角度：[放鬆, 捏牌]，依序是近節、中節、遠節
@@ -1356,29 +1362,150 @@
   };
   const FINGER_NAMES = ['index', 'middle', 'ring', 'pinky', 'thumb'];
 
-  // 瓷白的手：邊緣帶一圈各家顏色的光，手腕用網點淡出
-  function handMaterial(glow) {
-    const m = new T.MeshPhysicalMaterial({ color: 0xe4e1da, roughness: 0.38, clearcoat: 0.6, clearcoatRoughness: 0.35, envMapIntensity: 0.7 });
+  // 皮膚：模型沒有貼圖，膚色不均、斑點、關節皺紋、指尖泛紅、指甲都用綁定姿勢的座標在 shader 裡算。
+  // 手腕用網點淡出。marks 是綁定姿勢裡的指尖、指甲、關節位置。
+  const SKIN_GLSL = `
+    varying vec3 vHandPos;
+    varying vec3 vHandNrm;
+    uniform vec3 uTips[5];
+    uniform vec3 uNails[5];
+    uniform vec3 uNailDir[5];
+    uniform vec3 uKnuck[14];
+    uniform vec3 uDorsal;
+    uniform vec3 uNail;
+    uniform float uAge, uBlotch, uPolish;
+    float hHash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+    float hNoise(vec3 x) {
+      vec3 i = floor(x), f = fract(x);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(mix(hHash(i), hHash(i + vec3(1, 0, 0)), f.x), mix(hHash(i + vec3(0, 1, 0)), hHash(i + vec3(1, 1, 0)), f.x), f.y),
+                 mix(mix(hHash(i + vec3(0, 0, 1)), hHash(i + vec3(1, 0, 1)), f.x), mix(hHash(i + vec3(0, 1, 1)), hHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+    }
+  `;
+  const SKIN_COLOR = `
+    #include <color_fragment>
+    float hFade = 1.0 - smoothstep(0.022, 0.07, vHandPos.y);
+    if (hFade < fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))) discard;
+    vec3 hn = normalize(vHandNrm);
+    float back = smoothstep(0.1, 0.6, dot(hn, uDorsal));
+    // 膚色不均與斑點（老人手背多）
+    float blot = hNoise(vHandPos * 150.0) * 0.6 + hNoise(vHandPos * 400.0) * 0.4;
+    diffuseColor.rgb *= 1.0 + (blot - 0.5) * 0.24 * (0.5 + uBlotch);
+    float spots = smoothstep(0.8, 0.9, hNoise(vHandPos * 260.0 + 7.0)) * uBlotch * back;
+    diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.74, 0.6, 0.5), spots * 0.55);
+    // 關節泛紅，手背那面有一圈圈皺紋
+    float kn = 0.0;
+    for (int i = 0; i < 14; i++) kn = max(kn, 1.0 - smoothstep(0.003, 0.011, distance(vHandPos, uKnuck[i])));
+    float lines = pow(0.5 + 0.5 * sin(vHandPos.y * 2400.0 + hNoise(vHandPos * 300.0) * 5.0), 5.0);
+    diffuseColor.rgb *= 1.0 - kn * back * lines * (0.2 + 0.45 * uAge);
+    diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(1.04, 0.8, 0.74), kn * 0.4);
+    // 指尖泛紅
+    float tipR = 0.0;
+    for (int i = 0; i < 5; i++) tipR = max(tipR, 1.0 - smoothstep(0.003, 0.016, distance(vHandPos, uTips[i])));
+    diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(1.04, 0.8, 0.76), tipR * 0.45);
+    // 指甲
+    float hNail = 0.0;
+    for (int i = 0; i < 5; i++) {
+      float d = distance(vHandPos, uNails[i]);
+      hNail = max(hNail, (1.0 - smoothstep(0.0058, 0.0072, d)) * smoothstep(0.25, 0.55, dot(hn, uNailDir[i])));
+    }
+    diffuseColor.rgb = mix(diffuseColor.rgb, uNail, hNail);
+  `;
+
+  function skinMaterial(look, marks) {
+    const m = new T.MeshPhysicalMaterial({
+      color: look.skin, roughness: 0.58, sheen: 0.5, sheenColor: new T.Color(0xff9c80), sheenRoughness: 0.55,
+      clearcoat: 0.06, clearcoatRoughness: 0.5, envMapIntensity: 0.35,
+    });
     m.onBeforeCompile = sh => {
-      sh.uniforms.uGlow = { value: new T.Color(glow) };
-      sh.vertexShader = 'varying float vWrist;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvWrist = position.y;');
-      sh.fragmentShader = 'varying float vWrist;\nuniform vec3 uGlow;\n' + sh.fragmentShader.replace('#include <tonemapping_fragment>', `
-        float hFade = 1.0 - smoothstep(0.022, 0.07, vWrist);
-        if (hFade < fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))) discard;
-        float hRim = pow(1.0 - saturate(dot(normalize(vViewPosition), normal)), 2.2);
-        gl_FragColor.rgb = mix(gl_FragColor.rgb, uGlow, min(1.0, hRim * 0.8 + (1.0 - hFade) * 0.9));
-        #include <tonemapping_fragment>`);
+      Object.assign(sh.uniforms, {
+        uTips: { value: marks.tips }, uNails: { value: marks.nails }, uNailDir: { value: marks.nailDir }, uKnuck: { value: marks.knuck },
+        uDorsal: { value: marks.dorsal }, uNail: { value: new T.Color(look.nail) },
+        uAge: { value: look.age }, uBlotch: { value: look.blotch }, uPolish: { value: look.polish ? 1 : 0 },
+      });
+      sh.vertexShader = 'varying vec3 vHandPos;\nvarying vec3 vHandNrm;\n' +
+        sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvHandPos = position;\nvHandNrm = normal;');
+      sh.fragmentShader = SKIN_GLSL + sh.fragmentShader
+        .replace('#include <color_fragment>', SKIN_COLOR)
+        .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, uPolish > 0.5 ? 0.12 : 0.32, hNail);')
+        .replace('#include <tonemapping_fragment>', `
+          // 透光感：邊緣帶一點血色
+          float hRim = pow(1.0 - saturate(dot(normalize(vViewPosition), normal)), 3.0);
+          gl_FragColor.rgb += vec3(0.3, 0.07, 0.03) * hRim * 0.4 * (1.0 - hNail);
+          #include <tonemapping_fragment>`);
     };
     return m;
+  }
+
+  // 配件都以綁定姿勢（公尺）擺好，再掛到骨頭上跟著動
+  const GEAR_MATS = {};
+  const gearMat = (k, o) => GEAR_MATS[k] || (GEAR_MATS[k] = new T.MeshPhysicalMaterial(o));
+  function addGear(kind, mesh, at, wristBone, ringBone, side) {
+    const pos = mesh.geometry.attributes.position, v = new T.Vector3();
+    // 某一段的截面：中心與半徑（x 是手掌厚度方向、z 是手寬）
+    const section = test => {
+      const c = new T.Vector3(), lo = new T.Vector3(1, 1, 1), hi = new T.Vector3(-1, -1, -1);
+      let n = 0;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i);
+        if (!test(v)) continue;
+        c.add(v); lo.min(v); hi.max(v); n++;
+      }
+      return { c: c.divideScalar(n || 1), half: hi.sub(lo).multiplyScalar(0.5) };
+    };
+    const g = new T.Group();
+    let bone;
+    if (kind === 'ring') {
+      const a = at('ring-finger-phalanx-proximal'), b = at('ring-finger-phalanx-intermediate');
+      const axis = b.clone().sub(a).normalize(), mid = a.clone().lerp(b, 0.5);
+      const sec = section(p => Math.abs(p.clone().sub(mid).dot(axis)) < 0.003 && p.distanceTo(mid) < 0.016);
+      const r = Math.max(sec.half.x, sec.half.z) * 1.05;
+      const band = new T.Mesh(new T.TorusGeometry(r, 0.0017, 10, 40),
+        gearMat('gold', { color: 0xd4a347, metalness: 1, roughness: 0.25, envMapIntensity: 1.2 }));
+      band.position.copy(sec.c);
+      band.quaternion.setFromUnitVectors(Z, axis);
+      g.add(band);
+      bone = ringBone;
+    } else {
+      const sec = section(p => p.y > 0.022 && p.y < 0.036);
+      const ring = (ax, az, tube, width, mat) => {
+        const m = new T.Mesh(new T.TorusGeometry(1, tube, 12, 48).rotateX(Math.PI / 2), mat);
+        m.scale.set(ax, width / tube, az);
+        m.position.copy(sec.c);
+        g.add(m);
+        return m;
+      };
+      if (kind === 'bangle') {
+        // 玉鐲：鬆鬆地套在手腕上
+        ring(sec.half.x * 1.3, sec.half.z * 1.18, 0.12, 0.0055,
+          gearMat('jade', { color: 0x4f9a68, roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.08, envMapIntensity: 0.9 }));
+      } else {
+        // 手錶：皮錶帶＋手背那面的金色錶面
+        ring(sec.half.x * 1.06, sec.half.z * 1.04, 0.1, 0.009, gearMat('strap', { color: 0x2b1b12, roughness: 0.7 }));
+        const face = new T.Group();
+        const cas = new T.Mesh(new T.CylinderGeometry(0.0135, 0.0135, 0.006, 32),
+          gearMat('gold', { color: 0xd4a347, metalness: 1, roughness: 0.25, envMapIntensity: 1.2 }));
+        const dial = new T.Mesh(new T.CylinderGeometry(0.011, 0.011, 0.0062, 32), gearMat('dial', { color: 0xf3eee2, roughness: 0.3, clearcoat: 1 }));
+        face.add(cas, dial);
+        face.quaternion.setFromUnitVectors(Y, new T.Vector3(side, 0, 0));
+        face.position.copy(sec.c).add(new T.Vector3(side * (sec.half.x * 1.06 + 0.002), 0, 0));
+        g.add(face);
+      }
+      bone = wristBone;
+    }
+    g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    // 綁定姿勢 → 骨頭底下：乘上那根骨頭的 boneInverse
+    const sk = mesh.skeleton;
+    g.applyMatrix4(sk.boneInverses[sk.bones.indexOf(bone)]);
+    bone.add(g);
   }
 
   function buildHands() {
     if (!T.GLTFLoader) return;
     for (let pid = 1; pid < 4; pid++) {
-      const skin = handMaterial(GLOWS[pid]);
       for (const side of [1, -1]) {
         new T.GLTFLoader().load(side > 0 ? 'models/hand-right.glb' : 'models/hand-left.glb', gltf => {
-          const h = makeHand(pid, side, gltf.scene, skin);
+          const h = makeHand(pid, side, gltf.scene);
           allHands.push(h);
           if (side > 0) hands[pid] = h;
         }, undefined, () => {});
@@ -1386,13 +1513,36 @@
     }
   }
 
-  function makeHand(pid, side, model, skin) {
+  function makeHand(pid, side, model) {
     const bone = {};
     model.updateMatrixWorld(true);
+    let mesh;
     model.traverse(o => {
       if (o.isBone) bone[o.name] = o;
-      if (o.isSkinnedMesh) { o.material = skin; o.castShadow = true; o.frustumCulled = false; }
+      if (o.isSkinnedMesh) { mesh = o; o.castShadow = true; o.frustumCulled = false; }
     });
+    // 綁定姿勢裡各關節的位置（節點的靜止姿勢跟網格對不上，要用 boneInverses 反推）
+    const sk = mesh.skeleton, look = LOOKS[pid];
+    const at = name => new T.Vector3().setFromMatrixPosition(sk.boneInverses[sk.bones.indexOf(bone[name])].clone().invert());
+    const tipName = f => f === 'thumb' ? 'thumb-tip' : f + '-finger-tip';
+    const lastName = f => f === 'thumb' ? 'thumb-phalanx-distal' : f + '-finger-phalanx-distal';
+    const dorsal = new T.Vector3(side, 0, 0);
+    // 拇指的指甲朝外側，其餘朝手背
+    const nailDir = FINGER_NAMES.map(f => (f === 'thumb' ? new T.Vector3(side * 0.55, 0, -0.85) : dorsal.clone()).normalize());
+    const marks = {
+      dorsal, nailDir,
+      tips: FINGER_NAMES.map(f => at(tipName(f))),
+      nails: FINGER_NAMES.map((f, i) => {
+        const tip = at(tipName(f));
+        return tip.clone().add(at(lastName(f)).sub(tip).normalize().multiplyScalar(0.0065)).addScaledVector(nailDir[i], 0.004);
+      }),
+      knuck: [].concat(...FINGER_NAMES.map(f => f === 'thumb'
+        ? [at('thumb-phalanx-proximal'), at('thumb-phalanx-distal')]
+        : ['proximal', 'intermediate', 'distal'].map(seg => at(`${f}-finger-phalanx-${seg}`)))),
+    };
+    mesh.material = skinMaterial(look, marks);
+    const gear = look.gear[side > 0 ? 'R' : 'L'];
+    if (gear) addGear(gear, mesh, at, bone.wrist, bone['ring-finger-phalanx-proximal'], side);
     const wq = o => o.getWorldQuaternion(new T.Quaternion());
     const wp = o => o.getWorldPosition(new T.Vector3());
     // 關節：接到上一節底下，記住原本的角度，以及在上一節座標裡的彎曲軸
@@ -1429,8 +1579,10 @@
     // 手腕放在原點
     const g = new T.Group(), fit = new T.Group();
     fit.quaternion.copy(handBasis(side));
-    fit.scale.setScalar(HAND_SCALE);
-    fit.position.copy(wp(bone.wrist)).multiplyScalar(-HAND_SCALE).applyQuaternion(fit.quaternion);
+    // 大小與手指粗細：模型的 x 是手掌厚度、y 沿手指、z 是手寬
+    const sz = HAND_SCALE * look.size;
+    fit.scale.set(sz * look.thick, sz, sz * look.thick);
+    fit.position.copy(wp(bone.wrist)).multiply(fit.scale).applyQuaternion(fit.quaternion).negate();
     fit.add(model);
     g.add(fit);
     // 捏牌時拇指與食指中指之間的那一點，相對手腕的位置
