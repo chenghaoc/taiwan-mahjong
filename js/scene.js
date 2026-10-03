@@ -1407,7 +1407,8 @@
     float hNail = 0.0;
     for (int i = 0; i < 5; i++) {
       float d = distance(vHandPos, uNails[i]);
-      hNail = max(hNail, (1.0 - smoothstep(0.0058, 0.0072, d)) * smoothstep(0.25, 0.55, dot(hn, uNailDir[i])));
+      float r = i == 3 ? 0.8 : i == 2 ? 0.92 : i == 4 ? 1.12 : 1.0;
+      hNail = max(hNail, (1.0 - smoothstep(0.0048 * r, 0.006 * r, d)) * smoothstep(0.3, 0.6, dot(hn, uNailDir[i])));
     }
     diffuseColor.rgb = mix(diffuseColor.rgb, uNail, hNail);
   `;
@@ -1527,15 +1528,40 @@
     const tipName = f => f === 'thumb' ? 'thumb-tip' : f + '-finger-tip';
     const lastName = f => f === 'thumb' ? 'thumb-phalanx-distal' : f + '-finger-phalanx-distal';
     const dorsal = new T.Vector3(side, 0, 0);
-    // 拇指的指甲朝外側，其餘朝手背
-    const nailDir = FINGER_NAMES.map(f => (f === 'thumb' ? new T.Vector3(side * 0.55, 0, -0.85) : dorsal.clone()).normalize());
+    // 「指尖」關節其實在最後一節中間，真正的指尖要往外再找網格上最遠的點；
+    // 指甲中心放在離指尖 6 公釐那圈截面上最靠手背的點（拇指的指甲朝外側）
+    const verts = mesh.geometry.attributes.position, pv = new T.Vector3();
+    const tips = [], nails = [], nailDir = [];
+    FINGER_NAMES.forEach(f => {
+      const joint = at(tipName(f)), dir = joint.clone().sub(at(lastName(f))).normalize();
+      const out = (f === 'thumb' ? new T.Vector3(side * 0.55, 0, -0.85) : dorsal.clone()).normalize();
+      const end = joint.clone(), nail = new T.Vector3(), mid = new T.Vector3();
+      let far = -Infinity, top = -Infinity, n = 0;
+      for (let i = 0; i < verts.count; i++) {
+        pv.fromBufferAttribute(verts, i);
+        if (pv.distanceTo(joint) < 0.02 && pv.dot(dir) > far) { far = pv.dot(dir); end.copy(pv); }
+      }
+      // 網格很粗，取前後 4 公釐一段來估手指的中軸與手背那面的高度
+      const ring = end.clone().addScaledVector(dir, -0.006), up = out.addScaledVector(dir, -out.dot(dir)).normalize();
+      for (let i = 0; i < verts.count; i++) {
+        pv.fromBufferAttribute(verts, i);
+        if (Math.abs(pv.clone().sub(ring).dot(dir)) > 0.004 || pv.distanceTo(ring) > 0.013) continue;
+        mid.add(pv); n++;
+      }
+      if (n) mid.divideScalar(n).addScaledVector(dir, ring.clone().sub(mid).dot(dir));
+      else mid.copy(ring);
+      for (let i = 0; i < verts.count; i++) {
+        pv.fromBufferAttribute(verts, i);
+        if (Math.abs(pv.clone().sub(ring).dot(dir)) > 0.004 || pv.distanceTo(ring) > 0.013) continue;
+        top = Math.max(top, pv.clone().sub(mid).dot(up));
+      }
+      nail.copy(mid).addScaledVector(up, top > 0 ? top : 0.006);
+      tips.push(end.addScaledVector(dir, -0.003));
+      nails.push(nail);
+      nailDir.push(up);
+    });
     const marks = {
-      dorsal, nailDir,
-      tips: FINGER_NAMES.map(f => at(tipName(f))),
-      nails: FINGER_NAMES.map((f, i) => {
-        const tip = at(tipName(f));
-        return tip.clone().add(at(lastName(f)).sub(tip).normalize().multiplyScalar(0.0065)).addScaledVector(nailDir[i], 0.004);
-      }),
+      dorsal, nailDir, tips, nails,
       knuck: [].concat(...FINGER_NAMES.map(f => f === 'thumb'
         ? [at('thumb-phalanx-proximal'), at('thumb-phalanx-distal')]
         : ['proximal', 'intermediate', 'distal'].map(seg => at(`${f}-finger-phalanx-${seg}`)))),
