@@ -1180,6 +1180,7 @@
     pos.needsUpdate = true;
     sparkLife = 2.6;
     sparks.visible = true;
+    S.handPose(pid, 'cheer', 2800);
   };
   // 結算看完，鏡頭歸位
   S.rest = () => { cam.yawTo = 0; cam.zoomTo = 1; };
@@ -1303,7 +1304,7 @@
 
   // ---- 對手的手 ----
   // 三位對手各兩隻浮在桌上的手：WebXR 的 generic-hand 模型（單位公尺），沒有手臂，手腕漸漸淡掉。
-  // 出牌用右手，左手擱在桌角。
+  // 出牌用右手；沒輪到自己時兩隻手會換姿勢：擱桌緣、交握、指尖相抵、敲桌面、摸自己的牌、玩籌碼。
   // 模型的關節全是平輩，載入後照手指重新串成父子，才能一節一節彎。
   // 模型沒載到（例如直接開檔案）就沒有手，牌照舊自己飛。
   const HAND_SCALE = 102;                   // 桌上一單位約 0.9 公分
@@ -1321,7 +1322,39 @@
   // side：右手 1、左手 -1，左手的一切都是右手對 x 鏡射
   const handBasis = side => new T.Quaternion().setFromRotationMatrix(
     new T.Matrix4().makeBasis(new T.Vector3(0, side, 0), new T.Vector3(0, 0, 1), new T.Vector3(side, 0, 0)));
-  const handTurn = (side, yaw, pitch) => new T.Quaternion().setFromAxisAngle(Y, yaw * side).multiply(rotX(pitch));
+  const handTurn = (side, yaw, pitch, roll) =>
+    new T.Quaternion().setFromAxisAngle(Y, yaw * side).multiply(rotX(pitch)).multiply(new T.Quaternion().setFromAxisAngle(Z, roll * side));
+
+  // 閒著時的姿勢。p：捏點在座位座標的位置（x 以右手為準，左手自動鏡射）；yaw/pitch/roll：手的轉向；
+  // c：手指彎多少（0 放鬆、1 捏牌）；w：隨機挑到的機會，沒有 w 的只在特定時候用
+  const EDGE_REST = { p: [40, 3.6, 54], yaw: 0.45, pitch: -0.25, roll: 0, c: 0 };
+  const STANCES = {
+    rest: { w: 3, R: EDGE_REST, L: EDGE_REST },
+    clasp: {
+      w: 2,
+      R: { p: [2.5, 4.6, 53.5], yaw: 1.25, pitch: -0.15, roll: -0.3, c: 0.55 },
+      L: { p: [2.5, 3.9, 54.5], yaw: 1.05, pitch: -0.2, roll: -0.2, c: 0.6 },
+    },
+    steeple: {
+      w: 1,
+      R: { p: [2.6, 8.5, 49], yaw: 0.15, pitch: 1.2, roll: -1.45, c: 0.15 },
+      L: { p: [2.6, 8.5, 49], yaw: 0.15, pitch: 1.2, roll: -1.45, c: 0.15 },
+    },
+    drum: { w: 2, R: { p: [26, 1.7, 48], yaw: 0.35, pitch: -0.15, roll: 0, c: 0.05, tap: true }, L: EDGE_REST },
+    fiddle: {
+      w: 2,
+      R: { p: [8, 6.2, 46.5], yaw: 0.2, pitch: -0.85, roll: 0, c: 0.75, wiggle: true },
+      L: { p: [30, 3.4, 53], yaw: 0.6, pitch: -0.2, roll: 0, c: 0.3 },
+    },
+    // 左手在自己的籌碼上撥弄
+    chips: { w: 2, R: EDGE_REST, L: { p: [36, 4.4, 34], yaw: 0.2, pitch: -0.9, roll: 0, c: 0.65, wiggle: true } },
+    // 胡牌：兩手握拳在牌上方揮動
+    cheer: {
+      R: { p: [12, 11, 48], yaw: 0.2, pitch: 1.35, roll: -1.3, c: 1.35, pump: true },
+      L: { p: [12, 11, 48], yaw: 0.2, pitch: 1.35, roll: -1.3, c: 1.35, pump: true },
+    },
+  };
+  const FINGER_NAMES = ['index', 'middle', 'ring', 'pinky', 'thumb'];
 
   // 瓷白的手：邊緣帶一圈各家顏色的光，手腕用網點淡出
   function handMaterial(glow) {
@@ -1367,7 +1400,8 @@
     const hinge = (name, parent, axis, bend) => {
       const b = bone[name];
       parent.attach(b);
-      joints.push({ b, q0: b.quaternion.clone(), ax: axis.clone().applyQuaternion(wq(parent).invert()), bend });
+      const fi = FINGER_NAMES.findIndex(n => name.startsWith(n));
+      joints.push({ b, fi, q0: b.quaternion.clone(), ax: axis.clone().applyQuaternion(wq(parent).invert()), bend });
       return b;
     };
     const flex = new T.Vector3(0, 0, -side), none = [0, 0];
@@ -1376,8 +1410,9 @@
       ['proximal', 'intermediate', 'distal'].forEach((seg, i) => { p = hinge(`${f}-finger-phalanx-${seg}`, p, flex, CURL[f][i]); });
       p.attach(bone[f + '-finger-tip']);
     }
-    const pose = c => {
-      for (const j of joints) j.b.quaternion.setFromAxisAngle(j.ax, j.bend[0] + (j.bend[1] - j.bend[0]) * c).multiply(j.q0);
+    // ex：每根手指（食、中、無名、小、拇）額外多彎的量
+    const pose = (c, ex) => {
+      for (const j of joints) j.b.quaternion.setFromAxisAngle(j.ax, j.bend[0] + (j.bend[1] - j.bend[0]) * (c + (ex ? ex[j.fi] : 0))).multiply(j.q0);
     };
     // 拇指：繞著「拇指根 → 食指中指指尖」這個平面轉過去對捏
     pose(1);
@@ -1405,64 +1440,109 @@
     pose(0);
 
     scene.add(g);
-
-    // 休息時擱在自己這邊的桌緣，左右各一隻，離桌角遠一點免得跟鄰家的手疊在一起
-    const rest = place(pid, 40 * side, 3.6, 54, Q_STAND).pos;
-    const h = {
-      pid, g, pose, grip, rest, p: rest.clone(), job: null, phase: pid * 2.1 + side,
-      qRest: handTurn(side, 0.45, -0.25), qGrab: handTurn(side, 0.1, -0.95),
-    };
-    setHand(h, 0);
-    return h;
+    return { pid, side, g, pose, grip, p: new T.Vector3(), ip: new T.Vector3(), q: new T.Quaternion(), c: 0, fresh: true, job: null,
+      phase: pid * 2.1 + side, qGrab: handTurn(side, 0.1, -0.95, 0) };
   }
 
   const hQ = new T.Quaternion(), hA = new T.Vector3();
-  // 把捏點放到 h.p；c 從 0（放鬆）到 1（捏住）
-  function setHand(h, c) {
-    h.pose(c);
-    hQ.copy(h.qRest).slerp(h.qGrab, c).premultiply(seatQ[h.pid]);
+  // 把捏點放到 h.p，手的轉向是座位座標裡的 q；c 從 0（放鬆）到 1（捏住）
+  function setHand(h, q, c, ex) {
+    h.pose(c, ex);
+    hQ.copy(q).premultiply(seatQ[h.pid]);
     h.g.quaternion.copy(hQ);
     h.g.position.copy(h.p).sub(hA.copy(h.grip).applyQuaternion(hQ));
   }
 
-  // 伸手去拿 t：tw.grab 毫秒內到位捏住，跟著牌提起，起飛時順勢往前一送再收回
+  // 伸手去拿 t：tw.grab 毫秒內到位捏住，跟著牌提起，起飛時順勢往前一送，之後回到閒著的姿勢
   function reach(h, t) {
     if (!h) return;
     const lift = t.tw.t0, from = lift - t.tw.pre;
-    h.job = { t, from, at: from + t.tw.grab, lift, sent: lift + 170, back: lift + 170 + 480, p0: null, p1: new T.Vector3(), p2: null };
+    h.job = { t, from, at: from + t.tw.grab, lift, sent: lift + 170, p0: null, p1: new T.Vector3(), p2: null };
   }
+  // 各家現在擺什麼姿勢：輪到自己就回桌緣準備，其餘時間每隔幾秒隨機換一個
+  const mood = [];
+  function stanceOf(pid, now) {
+    const m = mood[pid] || (mood[pid] = { name: 'rest', until: now + rnd(2000, 5000) });
+    if (m.force && now < m.until) return m.name;
+    m.force = false;
+    if (game && game.turn === pid && !S.idle) {
+      m.name = 'rest';
+      m.until = Math.max(m.until, now + rnd(1500, 3000));
+    } else if (now > m.until) {
+      const pool = Object.keys(STANCES).filter(k => STANCES[k].w && k !== m.name);
+      let r = Math.random() * pool.reduce((sum, k) => sum + STANCES[k].w, 0);
+      m.name = pool.find(k => (r -= STANCES[k].w) < 0) || 'rest';
+      m.until = now + rnd(3500, 8000);
+    }
+    return m.name;
+  }
+  // 指定某家擺某個姿勢 ms 毫秒（胡牌時舉手歡呼）
+  S.handPose = (pid, name, ms) => { mood[pid] = { name, until: performance.now() + (ms || 3000), force: true }; };
+
+  let handNow = 0;
+  const hT = new T.Vector3(), hQ2 = new T.Quaternion(), fingerEx = [0, 0, 0, 0, 0];
   function moveHands(now) {
+    const dt = handNow ? Math.min(0.1, (now - handNow) / 1000) : 0;
+    handNow = now;
+    const k = 1 - Math.exp(-dt * 3.2);
     for (const h of allHands) {
+      // 往目前姿勢慢慢靠過去
+      const st = STANCES[stanceOf(h.pid, now)], spec = h.side > 0 ? st.R : st.L;
+      hT.set(spec.p[0] * h.side, spec.p[1], spec.p[2]).applyQuaternion(seatQ[h.pid]);
+      const key = 'q' + h.side, q = spec[key] || (spec[key] = handTurn(h.side, spec.yaw, spec.pitch, spec.roll));
+      if (h.fresh) { h.ip.copy(hT); h.q.copy(q); h.c = spec.c; h.fresh = false; }
+      h.ip.lerp(hT, k);
+      h.q.slerp(q, k);
+      h.c += (spec.c - h.c) * k;
+
       const j = h.job;
-      let c = 0;
       if (j && now >= j.from) {
+        let c = 0;
         if (now < j.lift) {
           // 捏在牌的上半截
           j.p1.copy(j.t.g.position);
           j.p1.y += H / 2 - 1;
           if (!j.p0) j.p0 = h.p.clone();
           c = Math.min(1, (now - j.from) / (j.at - j.from));
-          const k = smooth(c);
-          h.p.lerpVectors(j.p0, j.p1, k);
-          h.p.y += 14 * k * (1 - k);
-        } else if (now < j.sent) {
+          const e = smooth(c);
+          h.p.lerpVectors(j.p0, j.p1, e);
+          h.p.y += 14 * e * (1 - e);
+        } else {
           if (!j.p2) {
             // 往落點的方向送一小段
             j.p2 = j.t.pos.clone().sub(j.p1).setY(0);
             j.p2.multiplyScalar(Math.min(0.3, 10 / (j.p2.length() || 1))).add(j.p1).setY(j.p1.y + 2.5);
           }
-          const k = (now - j.lift) / (j.sent - j.lift);
-          h.p.lerpVectors(j.p1, j.p2, k * (2 - k));
-          c = 1 - k;
-        } else if (now < j.back) {
-          const k = smooth((now - j.sent) / (j.back - j.sent));
-          h.p.lerpVectors(j.p2 || j.p1, h.rest, k);
-          h.p.y += 10 * k * (1 - k);
-        } else h.job = null;
+          const e = Math.min(1, (now - j.lift) / (j.sent - j.lift));
+          h.p.lerpVectors(j.p1, j.p2, e * (2 - e));
+          c = 1 - e;
+          // 送完了，從這裡接回閒著的姿勢
+          if (e === 1) { h.job = null; h.ip.copy(h.p); }
+        }
+        setHand(h, hQ2.copy(h.q).slerp(h.qGrab, c), c);
+        continue;
       }
-      // 閒著的手隨呼吸輕輕起伏
-      if (!h.job) h.p.copy(h.rest).y += 0.35 * Math.sin(now / 900 + h.phase);
-      setHand(h, c);
+
+      // 閒著：呼吸起伏，加上姿勢自己的小動作
+      const ex = fingerEx.fill(0);
+      h.p.copy(h.ip);
+      h.p.y += 0.35 * Math.sin(now / 900 + h.phase);
+      if (spec.tap) {
+        // 從小指到食指輪流敲桌面，敲完停一下
+        const u = (now / 1000 * 1.3 + h.phase) % 1;
+        for (let i = 0; i < 4; i++) {
+          const w = (u - (3 - i) * 0.11) / 0.11;
+          if (w > 0 && w < 1) ex[i] = -0.45 * Math.sin(Math.PI * w);
+        }
+      }
+      if (spec.wiggle) {
+        // 摸著自己的牌：指頭與手輕輕撥動
+        for (let i = 0; i < 5; i++) ex[i] = 0.18 * Math.sin(now / 260 + i * 1.3 + h.phase);
+        h.p.x += 0.5 * Math.sin(now / 520 + h.phase);
+        h.p.y += 0.25 * Math.sin(now / 330);
+      }
+      if (spec.pump) h.p.y += 3 * Math.abs(Math.sin(now / 170 + h.side * 0.6));
+      setHand(h, h.q, h.c, ex);
     }
   }
 
