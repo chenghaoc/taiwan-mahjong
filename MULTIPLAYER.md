@@ -27,6 +27,15 @@ Limits: the free instance sleeps after about 15 idle minutes (the first visitor 
 
 Tests: `npm test`, or `node test/sim.js` (rules + AI) and `node test/lan.js` (full games over HTTP with two simulated players).
 
+## 台灣大富翁 (Monopoly)
+
+`monopoly.html` is a Taiwan-themed Monopoly on the same server, linked from the mahjong start screen (大富翁) and back. Solo play is you against three computer players; 連線對戰 works exactly like mahjong (same Wi-Fi, or a `?room=` share link online).
+
+- Code: `js/mono/` — `board.js` (40 squares, 機會/命運 cards), `game.js` (`MONO.Game`, same agent/`ui.emit` shape as `MJ.Game`), `ai.js`, `scene.js` (three.js board in the mahjong room), `ui.js`, `net.js`.
+- Rules: classic Monopoly scaled ×10 in NT$ ($15,000 start, $2,000 for passing 起點), even building, mortgages, jail, doubles. No auctions; instead you can make cash offers for other players' unimproved land (出價收購), which the AI also uses to complete color sets. Games last 20 or 40 rounds (richest by total assets wins) or until one player is left.
+- Server: `MonoRoom` in `server.js` extends the mahjong `Room` (lobby, seats, reconnect, computer takeover). Requests carry `game=mono`, so mahjong and Monopoly tables with the same code don't collide. Everything is public, so every player gets the same state plus `me`. Every decision times out (60 s for a turn, 30 s to buy, 25 s for an offer) and the computer answers instead.
+- Tests: `node test/mono-sim.js` (450 AI and random-move games with invariant checks) and `node test/mono-lan.js` (games over HTTP with two simulated players, illegal answers, a disconnect).
+
 ## Not done yet
 
 - Hardening for strangers: server-issued player tokens, per-IP connection and message limits, a turn timer for discards (today only claims time out).
