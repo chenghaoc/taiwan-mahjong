@@ -179,20 +179,18 @@
     return b.join('');
   }
   function hintHtml() {
-    const secs = pending && pending.secs ? `<span class="secs">（${pending.secs} 秒內沒決定，電腦幫你選）</span>` : '';
+    const secs = pending && pending.secs ? ` <span class="secs">${pending.secs}s</span>` : '';
     if (!pending) {
       const p = st.players[st.turn];
       return p && st.turn !== me ? `${who(st.turn)} 的回合…` : '';
     }
     const o = pending.o, p = st.players[me];
-    if (pending.kind === 'buy') return `停在 ${place(o.sq)}，要花 ${money(o.price)} 買下嗎？你有 ${money(p.cash)}。${secs}`;
-    if (pending.kind === 'deal') return `${who(o.from)} 想用 ${money(o.price)} 收購你的 ${place(o.sq)}（原價 ${money(SQ[o.sq].price)}）。${secs}`;
-    if (pending.kind === 'raise') {
-      return `要付 ${money(o.owe)}（${o.why}），現金只有 ${money(p.cash)}。拆房子或抵押來湊錢，不然只能破產。${secs}`;
-    }
-    if (o.roll && p.jail) return `你在牢裡（第 ${p.jail} 輪）：交保、用出獄許可證，或擲出對子出獄。${secs}`;
-    if (o.roll) return `輪到你了，擲骰子吧。點棋盤上的格子可以看地契。${secs}`;
-    return `要蓋房子、抵押或出價收購嗎？做完就結束回合。${secs}`;
+    if (pending.kind === 'buy') return `買下 ${place(o.sq)}？${money(o.price)}${secs}`;
+    if (pending.kind === 'deal') return `${who(o.from)} 出價 ${money(o.price)} 收購 ${place(o.sq)}${secs}`;
+    if (pending.kind === 'raise') return `要付 ${money(o.owe)}（${o.why}），現金不足${secs}`;
+    if (o.roll && p.jail) return `坐牢第 ${p.jail} 輪${secs}`;
+    if (o.roll) return `輪到你擲骰子${secs}`;
+    return `做完就結束回合${secs}`;
   }
   function refresh() {
     if (!st) return;

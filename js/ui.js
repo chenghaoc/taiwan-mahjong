@@ -61,13 +61,12 @@
   function hintHtml(me) {
     const need = 5 - me.melds.length;
     if (pending && pending.kind === 'claim') {
-      return `<span>${game.players[pending.from].name}打出</span>${tile(pending.tile, 't-xs')}<span>，要嗎？` +
-        `${pending.secs ? `（${pending.secs} 秒內沒選算過）` : ''}</span>`;
+      return `<span>${game.players[pending.from].name}打出</span>${tile(pending.tile, 't-xs')}<span>，要嗎？</span>` +
+        (pending.secs ? `<span class="dim">${pending.secs}s</span>` : '');
     }
     if (pending && pending.kind === 'turn') {
       if (selected < 0) {
-        return '<span>輪到你了。點一張牌選取，再點一次打出；按住不放可以蓄力甩出去。</span>' +
-          (prefs.tips ? '<span class="dim">牌上的數字是打掉它之後的進張數</span>' : '');
+        return '<span>輪到你出牌</span>';
       }
       const k = me.hand[selected], name = MJ.tileName(k);
       const c = MJ.toCounts(me.hand);
@@ -76,8 +75,8 @@
       if (w) return `<span>打出${name}後聽</span>${w}`;
       const a = prefs.tips && analysis && analysis.find(x => x.k === k);
       return a
-        ? `<span>打出${name}：${a.s} 向聽，有效進張 ${a.uke} 張。再點一次打出。</span>`
-        : `<span>再點一次打出${name}</span>`;
+        ? `<span>打${name}：${a.s} 向聽・進張 ${a.uke}</span>`
+        : `<span>打${name}？</span>`;
     }
     if (me.hand.length % 3 === 1) {
       const w = waitList(MJ.toCounts(me.hand), need);
