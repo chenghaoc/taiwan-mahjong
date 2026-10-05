@@ -18,6 +18,17 @@ Playing: open the service's link and pick 連線對戰. The page adds a table co
 
 Limits: the free instance sleeps after about 15 idle minutes (the first visitor waits up to a minute), and a restart or deploy drops games in progress because tables live in memory. At most 200 tables at once; empty tables are removed.
 
+## Leaderboard
+
+Online games can keep a lifetime leaderboard in Postgres. After every hand, each human player's win or loss is added to their total under their name; computer players are not recorded. The waiting room shows the top 10. Without `DATABASE_URL` the server runs as before and the leaderboard is hidden.
+
+Setup, once:
+
+1. Create a free database at [neon.tech](https://neon.tech) (it doesn't expire, unlike Render's free Postgres) and copy its connection string (`postgresql://...?sslmode=require`).
+2. In the Render dashboard open the web service → Environment → add `DATABASE_URL` with that string → save (Render redeploys).
+
+The `scores` table is created automatically. Any Postgres works, including Supabase or Render Postgres. Names are not accounts: two people who use the same name share one row. Solo games aren't recorded.
+
 ## How it works
 
 - Each remote player is an agent whose `turn()` / `claim()` ask the browser and wait for the reply.

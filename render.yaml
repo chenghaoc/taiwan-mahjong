@@ -6,3 +6,7 @@ services:
     buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /api/ping
+    envVars:
+      # 總排行榜用的 Postgres 連線字串（例如 Neon 免費方案），在 Render 後台填
+      - key: DATABASE_URL
+        sync: false
