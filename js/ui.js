@@ -354,7 +354,7 @@
   async function playNet() {
     const cleanName = s => s.replace(/[<>&"']/g, '').trim().slice(0, 8);
     const v = await dialog(
-      '<h1>連線對戰</h1><p>同一個 Wi-Fi 的人都能加入同一桌，空位由電腦補上。</p>' +
+      '<h1>連線對戰</h1><p>拿到這桌連結的人都能加入（同一個 Wi-Fi 或線上都行），空位由電腦補上。</p>' +
       `<p><label>名字　<input id="name" maxlength="8" value="${cleanName(localStorage.mjName || '')}"></label></p>` +
       '<div class="btns"><button class="btn win" data-v="join">加入</button><button class="btn" data-v="back">返回</button></div>');
     if (v !== 'join') return '';
