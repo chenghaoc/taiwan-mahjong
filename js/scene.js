@@ -1284,13 +1284,21 @@
   function drawPlate() {
     const c = plateCtx;
     c.clearRect(0, 0, 512, 512);
+    // 方框、雙金線、四角折角，與介面一致
     c.fillStyle = 'rgba(8, 26, 25, 0.72)';
-    c.beginPath();
-    c.roundRect ? c.roundRect(16, 16, 480, 480, 44) : c.rect(16, 16, 480, 480);
-    c.fill();
-    c.strokeStyle = 'rgba(246, 241, 227, 0.22)';
+    c.fillRect(16, 16, 480, 480);
+    c.strokeStyle = 'rgba(227, 178, 60, 0.45)';
     c.lineWidth = 3;
-    c.stroke();
+    c.strokeRect(17.5, 17.5, 477, 477);
+    c.strokeStyle = 'rgba(227, 178, 60, 0.25)';
+    c.lineWidth = 2;
+    c.strokeRect(38, 38, 436, 436);
+    c.fillStyle = '#e3b23c';
+    for (const [x, y] of [[16, 16], [496, 16], [16, 496], [496, 496]]) {
+      const sx = x < 256 ? 1 : -1, sy = y < 256 ? 1 : -1;
+      c.fillRect(Math.min(x, x + sx * 64), Math.min(y, y + sy * 9), 64, 9);
+      c.fillRect(Math.min(x, x + sx * 9), Math.min(y, y + sy * 64), 9, 64);
+    }
     c.textAlign = 'center';
     c.textBaseline = 'middle';
     const kai = '"DFKai-SB", "BiauKai", "KaiTi", serif';
