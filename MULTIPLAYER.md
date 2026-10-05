@@ -35,6 +35,7 @@ The `scores` table is created automatically. Any Postgres works, including Supab
 - Each player is sent only what their seat may see: other hands, concealed kongs and the wall arrive as counts. `js/net.js` fills those with placeholder tiles so the 3D table can still draw 144 tiles.
 - Server → browser is server-sent events (`/api/events`); browser → server is `POST /api/send`. Replies are checked against the options the server offered.
 - Claims (吃碰槓胡) time out after 15 seconds and count as a pass. A player who disconnects for 15 seconds is played by the computer until they come back; if every human leaves, the game ends.
+- After each hand the result screen waits for every connected player to press 下一局, for at most 60 seconds.
 
 Tests: `npm test`, or `node test/sim.js` (rules + AI) and `node test/lan.js` (full games over HTTP with two simulated players).
 
