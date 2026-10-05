@@ -205,12 +205,21 @@
   }
 
   // ---- 物理：骰子與打出去的牌 ----
-  const G_GROUND = 1, G_DICE = 2, G_FENCE = 4, G_TILE = 8;
+  // G_TILE：飛出去的牌；G_REST：桌上躺著、被撞到才會動的牌
+  const G_GROUND = 1, G_DICE = 2, G_FENCE = 4, G_TILE = 8, G_REST = 16;
+  const HIT_TILES = G_GROUND | G_TILE | G_REST;
+  // 會被撞動的牌：牌河、吃碰槓、花牌，還有沒摸的牌牆和各家手牌
+  const PHYS_ZONES = ['discard', 'meld', 'flower', 'wall', 'hand'];
   let tileShape;
+  // 我的手牌放大過，剛體也跟著放大
+  const shapes = {};
+  const shapeFor = s => shapes[s] || (shapes[s] = new C.Box(new C.Vec3(W / 2 * s, H / 2 * s, D / 2 * s)));
+  const resting = [];
   function buildPhysics() {
     world = new C.World();
     world.gravity.set(0, -260, 0);
     world.allowSleep = true;
+    world.broadphase = new C.SAPBroadphase(world);
     world.defaultContactMaterial.friction = 0.35;
     world.defaultContactMaterial.restitution = 0.3;
     const plane = (group, mask, axis, angle, x, y, z) => {
@@ -219,21 +228,21 @@
       b.position.set(x, y, z);
       world.addBody(b);
     };
-    plane(G_GROUND, G_DICE | G_TILE, new C.Vec3(1, 0, 0), -Math.PI / 2, 0, 0, 0);
+    plane(G_GROUND, G_DICE | G_TILE | G_REST, new C.Vec3(1, 0, 0), -Math.PI / 2, 0, 0, 0);
     // 骰子只在桌子中央滾，四面看不見的擋板圍住
     const up = new C.Vec3(0, 1, 0), F = 13;
     plane(G_FENCE, G_DICE, up, -Math.PI / 2, F, 0, 0);
     plane(G_FENCE, G_DICE, up, Math.PI / 2, -F, 0, 0);
     plane(G_FENCE, G_DICE, up, Math.PI, 0, 0, F);
     plane(G_FENCE, G_DICE, up, 0, 0, 0, -F);
-    tileShape = new C.Box(new C.Vec3(W / 2, H / 2, D / 2));
+    tileShape = shapeFor(1);
   }
 
   // 把一張牌交給物理引擎丟向它的位置；落定後再由動畫推正
   // pw：甩牌的力道，沒蓄力的一般出牌當作 0.35
   function launch(t, now) {
     const pw = t.tw.power == null ? 0.35 : t.tw.power, hard = Math.max(0, pw - 0.35);
-    const g = t.g, b = new C.Body({ mass: 1, shape: tileShape, collisionFilterGroup: G_TILE, collisionFilterMask: G_GROUND });
+    const g = t.g, b = new C.Body({ mass: 1, shape: tileShape, collisionFilterGroup: G_TILE, collisionFilterMask: HIT_TILES });
     b.position.set(g.position.x, g.position.y, g.position.z);
     b.quaternion.set(g.quaternion.x, g.quaternion.y, g.quaternion.z, g.quaternion.w);
     b.linearDamping = 0.15; b.angularDamping = 0.35;
@@ -246,7 +255,10 @@
     const flip = new T.Vector3(1, 0, 0).applyQuaternion(g.quaternion).multiplyScalar(rnd(8, 13) * (0.5 + 1.43 * pw) * (Math.random() < 0.5 ? -1 : 1));
     b.angularVelocity.set(flip.x + rnd(-2, 2), flip.y + rnd(-3, 3), flip.z + rnd(-2, 2));
     const p = t.phys = { b, until: now + tf * 1000 + 420 + 600 * hard, hit: false, pw, kick: 0 };
-    b.addEventListener('collide', () => {
+    b.isTile = true;
+    wakeTable(g.position, t.pos, 12 + 22 * hard);
+    b.addEventListener('collide', e => {
+      if (e.body.isTile) knock(e, 1);
       if (p.hit) return;
       p.hit = true;
       ring(b.position, pw > 0.75);
@@ -266,9 +278,10 @@
   function jolt(pos, pw) {
     const now = performance.now(), R = 26;
     for (const t of tiles) {
-      if (t.tw || t.phys || !['discard', 'meld', 'flower'].includes(t.zone)) continue;
+      if (t.tw || t.phys || !PHYS_ZONES.includes(t.zone)) continue;
       const d = Math.hypot(t.pos.x - pos.x, t.pos.z - pos.z);
       if (d < 0.5 || d > R) continue;
+      if (t.rest) { t.rest.kickAt = now + d * 6; t.rest.kick = (pw - 0.45) * 45 * (1 - d / R); continue; }
       t.bounce = now + d * 6;
       t.bounceAmp = (pw - 0.45) * 2.4 * (1 - d / R);
     }
@@ -284,6 +297,71 @@
   function endPhys(t) {
     world.removeBody(t.phys.b);
     t.phys = null;
+  }
+
+  // 牌要飛出去了：落點附近、還有飛行路線兩旁（會擦過牌牆和手牌）的牌都給一個睡著的剛體，被撞到才醒來
+  let restUntil = 0, lastKnock = 0;
+  const LANE = 5;
+  function wakeTable(from, at, radius) {
+    const ax = at.x - from.x, az = at.z - from.z, l2 = ax * ax + az * az || 1;
+    for (const t of tiles) {
+      if (t.rest || t.tw || t.phys || !PHYS_ZONES.includes(t.zone)) continue;
+      const k = Math.max(0, Math.min(1, ((t.pos.x - from.x) * ax + (t.pos.z - from.z) * az) / l2));
+      const lane = Math.hypot(t.pos.x - from.x - ax * k, t.pos.z - from.z - az * k);
+      if (Math.hypot(t.pos.x - at.x, t.pos.z - at.z) > radius && lane > LANE) continue;
+      // 桌上的牌比飛來的牌輕，一撞就飛
+      const g = t.g, b = new C.Body({ mass: 0.35, shape: shapeFor(t.scale), collisionFilterGroup: G_REST, collisionFilterMask: HIT_TILES });
+      b.position.set(g.position.x, g.position.y, g.position.z);
+      b.quaternion.set(g.quaternion.x, g.quaternion.y, g.quaternion.z, g.quaternion.w);
+      b.linearDamping = 0.15; b.angularDamping = 0.35;
+      b.sleepSpeedLimit = 0.8; b.sleepTimeLimit = 0.25;
+      b.isTile = true;
+      b.addEventListener('collide', e => { if (e.body.isTile) knock(e, 0.6); });
+      b.sleep();
+      world.addBody(b);
+      t.rest = { b, moved: false, kickAt: 0, kick: 0 };
+      resting.push(t);
+    }
+    restUntil = performance.now() + 4000;
+  }
+  // 牌撞牌的喀聲，撞得越快越響
+  function knock(e, k) {
+    const v = Math.abs(e.contact.getImpactVelocityAlongNormal()), now = performance.now();
+    if (v < 4 || now - lastKnock < 45) return;
+    lastKnock = now;
+    clack(Math.min(0.9, v / 60) * k);
+  }
+  function endRest(t) {
+    world.removeBody(t.rest.b);
+    resting.splice(resting.indexOf(t), 1);
+    t.rest = null;
+  }
+  const NUDGE = 1.1, NUDGE_YAW = 0.6, axA = new T.Vector3(), axB = new T.Vector3();
+  // 撞完停下來：歪一點就留在那裡，像真的桌面；翻面、疊到別張上就推回原位
+  // 只留水平位移和水平轉角，跑太遠的拉回一點，牌河才不會亂到看不懂
+  function settleRest(t) {
+    const r = t.rest, b = r.b;
+    endRest(t);
+    if (!r.moved) return;
+    const home = t.home || { pos: t.pos.clone(), quat: t.quat.clone() };
+    const q = new T.Quaternion(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+    axA.set(0, 0, 1).applyQuaternion(q);
+    axB.set(0, 0, 1).applyQuaternion(home.quat);
+    const flat = axA.dot(axB) > 0.97 && Math.abs(b.position.y - home.pos.y) < 0.3;
+    const to = { pos: home.pos.clone(), quat: home.quat.clone(), scale: t.scale };
+    if (flat) {
+      const off = new T.Vector3(b.position.x - home.pos.x, 0, b.position.z - home.pos.z);
+      if (off.length() > NUDGE) off.setLength(NUDGE);
+      to.pos.add(off);
+      axA.set(1, 0, 0).applyQuaternion(q);
+      axB.set(1, 0, 0).applyQuaternion(home.quat);
+      let yaw = Math.atan2(-axA.z, axA.x) - Math.atan2(-axB.z, axB.x);
+      yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
+      yaw = Math.max(-NUDGE_YAW, Math.min(NUDGE_YAW, yaw));
+      to.quat.premultiply(new T.Quaternion().setFromAxisAngle(Y, yaw));
+    }
+    go(t, to, { dur: flat ? 160 : 320, arc: flat ? 0 : 1.5 });
+    t.home = home;
   }
 
   // ---- 桌上的小東西：籌碼、莊家牌 ----
@@ -629,7 +707,6 @@
 
   S.init = canvas => {
     renderer = new T.WebGLRenderer({ canvas, antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = T.PCFSoftShadowMap;
     scene = new T.Scene();
@@ -821,6 +898,9 @@
 
   function resize() {
     const w = window.innerWidth, h = window.innerHeight;
+    // 桌機最多 2 倍；手機螢幕小、像素密，給到原生倍率才不會糊（總像素約 330 萬為上限）
+    const dpr = window.devicePixelRatio || 1;
+    renderer.setPixelRatio(Math.min(dpr, Math.max(2, Math.sqrt(3.3e6 / (w * h)))));
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
@@ -952,6 +1032,8 @@
   // ---- 動畫 ----
   // o: dur 毫秒、arc 拋物線高度、spin 翻滾圈數、delay、pre 起飛前先提起的時間、land 落桌效果（true 或 'big'）
   function go(t, slot, o) {
+    if (t.rest) endRest(t);
+    t.home = null;
     if (t.phys) endPhys(t);
     // 剛摸進來還在飛的那張先歸位，手才不會伸到半空中去抓
     else if (o.grab && t.tw) { t.g.position.copy(t.pos); t.g.quaternion.copy(t.quat); }
@@ -1001,6 +1083,8 @@
     return (permCache[n] = out);
   }
 
+  // 被撞歪的牌記得原本該在哪，牌局沒變就不用搬它
+  const homeOf = t => t.home || t;
   // 同一種牌的實體可互換：挑總移動距離最短的配對，沒變動的牌留在原地
   S.sync = () => {
     if (!game) return;
@@ -1014,7 +1098,7 @@
         for (let i = 0; i < ms.length; i++) {
           const s = ss[perm[i]];
           if (!s) continue;
-          const d = ms[i].pos.distanceTo(s.pos);
+          const d = homeOf(ms[i]).pos.distanceTo(s.pos);
           if (d > 0.01) cost += d + 0.5;
         }
         if (cost < bestCost) { bestCost = cost; best = perm; }
@@ -1022,8 +1106,8 @@
       ms.forEach((t, i) => {
         const s = ss[best[i]];
         if (!s) return;
-        const dist = t.pos.distanceTo(s.pos);
-        if (dist > 0.01 || t.quat.angleTo(s.quat) > 0.01 || t.scale !== s.scale) go(t, s, motion(t, s, dist));
+        const h = homeOf(t), dist = h.pos.distanceTo(s.pos);
+        if (dist > 0.01 || h.quat.angleTo(s.quat) > 0.01 || t.scale !== s.scale) go(t, s, motion(t, s, dist));
         t.zone = s.zone; t.owner = s.owner; t.idx = s.idx; t.ring = s.ring;
       });
     }
@@ -1046,6 +1130,7 @@
   S.settle = () => {
     for (const t of tiles) {
       if (t.phys) endPhys(t);
+      if (t.rest) endRest(t);
       t.tw = null; t.bounce = 0;
       t.g.position.copy(t.pos); t.g.quaternion.copy(t.quat); t.g.scale.setScalar(t.scale);
     }
@@ -1109,7 +1194,7 @@
     fly(dealerBlock, dealerSpot(game.dealer), { dur: 600, arc: 8 });
     // 從莊家起逆時針數到第 sum 家，再從那一面牆的右端數 sum 墩開門
     const breakAt = sum => (WALL_SIDES.indexOf((game.dealer + sum - 1) % 4) * 18 + sum) % 72;
-    for (const t of tiles) { if (t.phys) endPhys(t); t.zone = 'wall'; }
+    for (const t of tiles) { if (t.phys) endPhys(t); if (t.rest) endRest(t); t.home = null; t.zone = 'wall'; }
 
     if (S.reduced) {
       S.wallOffset = breakAt(3 + Math.floor(Math.random() * 16));
@@ -1703,6 +1788,22 @@
         if (now > p.until) go(t, { pos: t.pos.clone(), quat: t.quat.clone(), scale: t.scale }, { dur: 260, arc: 0.6 });
         continue;
       }
+      if (t.rest) {
+        // 桌上的牌被撞醒或被震起來：照剛體走
+        const r = t.rest, b = r.b;
+        if (r.kickAt && now > r.kickAt) {
+          b.wakeUp();
+          b.velocity.y += r.kick;
+          b.angularVelocity.set(rnd(-1, 1) * r.kick * 0.08, rnd(-1, 1) * r.kick * 0.05, rnd(-1, 1) * r.kick * 0.08);
+          r.kickAt = 0;
+        }
+        if (b.sleepState !== C.Body.SLEEPING) r.moved = true;
+        if (r.moved) {
+          g.position.set(b.position.x, b.position.y, b.position.z);
+          g.quaternion.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+        }
+        continue;
+      }
       if (tw) {
         let k = (now - tw.t0) / tw.dur;
         if (k < 0) {
@@ -1738,12 +1839,20 @@
       }
     }
 
+    // 沒有牌在飛、被撞的也都停了，就把桌上的剛體收掉
+    if (resting.length && !tiles.some(t => t.phys)) {
+      const calm = resting.every(t => t.rest.b.sleepState === C.Body.SLEEPING && !t.rest.kickAt);
+      if (calm || now > restUntil) for (const t of resting.slice()) settleRest(t);
+    }
+
     // 蓄力中：牌提起來越抖越兇，上方顯示力道條
     if (charge) {
       const held = now - charge.t0, t = myTile(charge.idx);
       charge.live = held > CHARGE_DELAY && S.pickable && !!t;
       if (charge.live) {
         const u = ((held - CHARGE_DELAY) / CHARGE_MS) % 2, p = charge.p = u < 1 ? u : 2 - u;
+        // 蓄力時拿在手上，不再交給剛體
+        if (t.rest) endRest(t);
         if (!t.tw && !t.phys) {
           const shake = 0.35 * p * p;
           t.g.position.set(t.pos.x + rnd(-shake, shake), t.pos.y + 0.8 + 1.8 * p, t.pos.z + rnd(-shake, shake));
