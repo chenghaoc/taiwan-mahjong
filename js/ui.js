@@ -59,7 +59,6 @@
   }
 
   function hintHtml(me) {
-    const need = 5 - me.melds.length;
     if (pending && pending.kind === 'claim') {
       return `<span>${game.players[pending.from].name}打出</span>${tile(pending.tile, 't-xs')}<span>，要嗎？</span>` +
         (pending.secs ? `<span class="dim">${pending.secs}s</span>` : '');
@@ -69,18 +68,29 @@
         return '<span>輪到你出牌</span>';
       }
       const k = me.hand[selected], name = MJ.tileName(k);
-      const c = MJ.toCounts(me.hand);
-      c[k]--;
-      const w = waitList(c, need);
-      if (w) return `<span>打出${name}後聽</span>${w}`;
+      if (tingHtml(me)) return '';
       const a = prefs.tips && analysis && analysis.find(x => x.k === k);
       return a
         ? `<span>打${name}：${a.s} 向聽・進張 ${a.uke}</span>`
         : `<span>打${name}？</span>`;
     }
+    return '';
+  }
+
+  // 聽牌（或選中的牌打出後會聽）另外放在畫面中央偏下，比底部提示醒目
+  function tingHtml(me) {
+    const need = 5 - me.melds.length;
+    if (pending && pending.kind === 'turn') {
+      if (selected < 0) return '';
+      const k = me.hand[selected];
+      const c = MJ.toCounts(me.hand);
+      c[k]--;
+      const w = waitList(c, need);
+      return w ? `<b>打${MJ.tileName(k)}聽</b>${w}` : '';
+    }
     if (me.hand.length % 3 === 1) {
       const w = waitList(MJ.toCounts(me.hand), need);
-      if (w) return `<span>聽牌</span>${w}`;
+      if (w) return `<b>聽牌</b>${w}`;
     }
     return '';
   }
@@ -127,6 +137,9 @@
     const hint = hintHtml(game.players[0]);
     $('#hint').innerHTML = hint;
     $('#hint').hidden = !hint;
+    const ting = tingHtml(game.players[0]);
+    $('#ting').innerHTML = ting;
+    $('#ting').hidden = !ting;
     S.pickable = !!pending && pending.kind === 'turn';
     S.selected = selected;
     S.sync();
