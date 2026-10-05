@@ -299,6 +299,9 @@ body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none
   #lens .far, #lens .near { display: none; }
   #toggles .btn { font-size: calc(var(--u) * 1.4); padding: calc(var(--u) * 0.6) calc(var(--u) * 0.9); }
   .sheet { max-height: 92vh; padding: calc(var(--u) * 1.8) calc(var(--u) * 2.4); }
+  /* 鏡頭拉近、手牌放大（見 scene.js 的 RIG_PHONE）：按鈕列往上，讓出手牌上方的進張數 */
+  #actions { bottom: 33vh; }
+  #ting { bottom: 44vh; }
 }
 /* 瀏海與底部橫條 */
 #who0, #who3 { left: max(2vw, env(safe-area-inset-left)); }

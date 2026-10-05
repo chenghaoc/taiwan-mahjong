@@ -9,7 +9,7 @@
 
   // 牌的尺寸與桌面配置（單位：牌寬 3）
   const W = 3, H = 4, D = 1.9, PITCH = 3.12, LONG = H + 0.15, BEVEL = 0.12;
-  const HALF = 52, EDGE = 41, ROW = 44, WALL_Z = 32, POOL_Z = 11.5, LEAN = 0.62, MY_SCALE = 1.3;
+  const HALF = 52, EDGE = 41, ROW = 44, WALL_Z = 32, POOL_Z = 11.5, LEAN = 0.62;
   const WALL_SIDES = [0, 3, 2, 1];         // 牌牆順時針繞桌一圈
   const X = new T.Vector3(1, 0, 0), Y = new T.Vector3(0, 1, 0), Z = new T.Vector3(0, 0, 1);
   const rotX = a => new T.Quaternion().setFromAxisAngle(X, a);
@@ -46,6 +46,12 @@
   let charge = null, meter = null;
   const sparkVel = [], rings = [], up = new T.Vector3();
   const cam = { yaw: 0, zoom: 1, yawTo: 0, zoomTo: 1, fit: 1, shake: 0 };
+  // 鏡頭架設：dist/high 為鏡頭離桌心的水平距離與高度，look 為看向的桌面點，my 為我手牌的放大倍率。
+  // 橫放的手機螢幕實際很小：鏡頭壓近、往我這邊看，手牌再放大，桌邊木框和地板就不佔畫面
+  const RIG = { dist: 87, high: 80, look: 13, my: 1.3 };
+  const RIG_PHONE = { dist: 82, high: 77, look: 17, my: 1.55 };
+  const PHONE = window.matchMedia('(pointer: coarse) and (max-height: 540px) and (orientation: landscape)');
+  let rig = RIG;
 
   // ---- 建立場景 ----
   function roundedRect(w, h, r) {
@@ -906,8 +912,8 @@
 
   function setCamera(yaw, z) {
     const sn = Math.sin(yaw), cs = Math.cos(yaw);
-    camera.position.set(sn * 87 * z, 80 * z, cs * 87 * z);
-    camera.lookAt(sn * 13, 0, cs * 13);
+    camera.position.set(sn * rig.dist * z, rig.high * z, cs * rig.dist * z);
+    camera.lookAt(sn * rig.look, 0, cs * rig.look);
   }
 
   function resize() {
@@ -919,6 +925,8 @@
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     cam.fit = Math.max(1, 1.72 / camera.aspect);
+    const r = PHONE.matches ? RIG_PHONE : RIG;
+    if (r !== rig) { rig = r; S.sync(); }
     if (S.onResize) S.onResize();
   }
 
@@ -952,7 +960,7 @@
   S.handPoints = () => tiles
     .filter(t => t.zone === 'hand' && t.owner === 0)
     .sort((a, b) => a.idx - b.idx)
-    .map(t => toScreen(new T.Vector3(t.pos.x, 6.4, ROW - 3.3)));
+    .map(t => toScreen(new T.Vector3(t.pos.x, 4.9 * rig.my, ROW - 2.5 * rig.my)));
 
   S.setGame = (g, fresh) => {
     game = g;
@@ -1016,7 +1024,7 @@
       const right = p.melds.length ? mx + al / 2 - 0.3 : EDGE;
 
       // 手牌：自己的放大一些；攤開時改成平躺
-      const sc = pid === 0 && !shown ? MY_SCALE : 1, step = shown ? al : PITCH * sc;
+      const sc = pid === 0 && !shown ? rig.my : 1, step = shown ? al : PITCH * sc;
       const gap = gapLast ? 1.6 : 0, cnt = hand.length;
       const width = cnt * step + gap;
       let cx = 0;
@@ -1888,7 +1896,7 @@
           const shake = 0.35 * p * p;
           t.g.position.set(t.pos.x + rnd(-shake, shake), t.pos.y + 0.8 + 1.8 * p, t.pos.z + rnd(-shake, shake));
         }
-        const s = toScreen(vTmp.set(t.pos.x, 9, ROW - 2));
+        const s = toScreen(vTmp.set(t.pos.x, 7 * rig.my, ROW - 2));
         meter.style.left = s.x + 'px';
         meter.style.top = s.y + 'px';
         meter.style.setProperty('--p', (p * 100).toFixed(1) + '%');
