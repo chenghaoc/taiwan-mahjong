@@ -13,6 +13,7 @@
   let pending = null;   // 等真人決定：{kind:'turn'|'claim', o, tile, from, resolve}
   let selected = -1;
   let analysis = null;  // 輪到我時，每種牌打掉後的向聽數與進張
+  let handOver = false; // 有人胡了或流局：聽牌提示收起來，等下一局發牌
 
   // ---- 偏好設定（存在瀏覽器裡）----
   const prefs = { muted: false, tips: true, reduced: window.matchMedia('(prefers-reduced-motion: reduce)').matches };
@@ -79,6 +80,7 @@
 
   // 聽牌（或選中的牌打出後會聽）另外放在畫面中央偏下，比底部提示醒目
   function tingHtml(me) {
+    if (handOver) return '';
     const need = 5 - me.melds.length;
     if (pending && pending.kind === 'turn') {
       if (selected < 0) return '';
@@ -207,6 +209,7 @@
   const ui = {
     async emit(type, d) {
       if (type === 'deal') {
+        handOver = false;
         for (let pid = 0; pid < 4; pid++) $('#who' + pid).innerHTML = whoHtml(pid);
         await S.deal();
         return;
@@ -214,6 +217,7 @@
       const win = type === 'call' && /胡|自摸/.test(d.text);
       if (type === 'discard') S.mark = true;
       if (type === 'call') S.mark = false;
+      if (win) handOver = true;
       if (win) S.reveal = { pid: d.pid, ron: d.text === '胡', from: game.lastDiscard ? game.lastDiscard.from : -1 };
       refresh();
       if (type === 'call' || type === 'flower') shout(d.pid, d.text);
@@ -323,6 +327,7 @@
     $('#hud').hidden = false;
     while (!game.over) {
       const r = await game.playHand();
+      handOver = true;
       refresh();
       if (r.type === 'win' && !prefs.reduced) await showTai(r);
       // 結算前把四家的手牌都攤開
@@ -412,6 +417,7 @@
           // 逾時或已由電腦代答
           if (pending && pending.seq === m.seq) { pending = null; selected = -1; refresh(); }
         } else if (m.t === 'result') {
+          handOver = true;
           show(m.state);
           S.rest();
           S.pay();
@@ -431,6 +437,7 @@
           $('#overlay').hidden = true;
           $('#hud').hidden = false;
           S.idle = false; S.reveal = null; S.mark = false;
+          handOver = false;
           pending = null;
           refresh();
           S.settle();
