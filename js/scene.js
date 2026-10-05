@@ -315,20 +315,46 @@
       const k = Math.max(0, Math.min(1, ((t.pos.x - from.x) * ax + (t.pos.z - from.z) * az) / l2));
       const lane = Math.hypot(t.pos.x - from.x - ax * k, t.pos.z - from.z - az * k);
       if (Math.hypot(t.pos.x - at.x, t.pos.z - at.z) > radius && lane > LANE) continue;
-      // 桌上的牌比飛來的牌輕，一撞就飛
-      const g = t.g, b = new C.Body({ mass: 0.35, shape: shapeFor(t.scale), collisionFilterGroup: G_REST, collisionFilterMask: HIT_TILES });
-      b.position.set(g.position.x, g.position.y, g.position.z);
-      b.quaternion.set(g.quaternion.x, g.quaternion.y, g.quaternion.z, g.quaternion.w);
-      b.linearDamping = 0.15; b.angularDamping = 0.35;
-      b.sleepSpeedLimit = 0.8; b.sleepTimeLimit = 0.25;
-      b.isTile = true;
-      b.addEventListener('collide', e => { if (e.body.isTile) knock(e, 0.6); });
-      b.sleep();
-      world.addBody(b);
-      t.rest = { b, moved: false, kickAt: 0, kick: 0 };
-      resting.push(t);
+      restBody(t);
     }
     restUntil = performance.now() + 4000;
+  }
+  // 桌上的牌比飛來的牌輕，一撞就飛
+  function restBody(t) {
+    const g = t.g, b = new C.Body({ mass: 0.35, shape: shapeFor(t.scale), collisionFilterGroup: G_REST, collisionFilterMask: HIT_TILES });
+    b.position.set(g.position.x, g.position.y, g.position.z);
+    b.quaternion.set(g.quaternion.x, g.quaternion.y, g.quaternion.z, g.quaternion.w);
+    b.linearDamping = 0.15; b.angularDamping = 0.35;
+    b.sleepSpeedLimit = 0.8; b.sleepTimeLimit = 0.25;
+    b.isTile = true;
+    b.addEventListener('collide', e => { if (e.body.isTile) knock(e, 0.6); });
+    b.sleep();
+    world.addBody(b);
+    t.rest = { b, moved: false, kickAt: 0, kick: 0, push: null };
+    resting.push(t);
+  }
+  // 胡牌那一拍：贏家把牌一推，整桌的牌從他那邊震飛出去，落下後再各自歸位
+  // 震源放在贏家手牌後面，自己的手牌也一起往前倒
+  function blast(pid) {
+    const now = performance.now(), R = 2 * HALF + 20;
+    const mine = tiles.filter(t => t.zone === 'hand' && t.owner === pid);
+    if (!mine.length) return;
+    const o = mine.reduce((v, t) => v.add(t.pos), new T.Vector3()).divideScalar(mine.length);
+    const back = Math.hypot(o.x, o.z) || 1;
+    o.x += o.x / back * 10; o.z += o.z / back * 10;
+    for (const t of tiles) {
+      if (t.tw || t.phys || !PHYS_ZONES.includes(t.zone)) continue;
+      if (!t.rest) restBody(t);
+      t.bounce = 0;
+      const dx = t.pos.x - o.x, dz = t.pos.z - o.z, d = Math.hypot(dx, dz) || 1, f = Math.max(0.3, 1 - d / R);
+      const out = rnd(14, 26) * f;
+      t.rest.kickAt = now + d * 4;
+      t.rest.kick = rnd(32, 50) * f + (t.zone === 'hand' && t.owner === pid ? 10 : 0);
+      t.rest.push = { x: dx / d * out + rnd(-3, 3), z: dz / d * out + rnd(-3, 3) };
+    }
+    restUntil = now + 4500;
+    cam.shake = Math.max(cam.shake, 1.8);
+    tone(55, 0.6, 0.7);
   }
   // 牌撞牌的喀聲，撞得越快越響
   function knock(e, k) {
@@ -1833,6 +1859,7 @@
         if (r.kickAt && now > r.kickAt) {
           b.wakeUp();
           b.velocity.y += r.kick;
+          if (r.push) { b.velocity.x += r.push.x; b.velocity.z += r.push.z; r.push = null; }
           b.angularVelocity.set(rnd(-1, 1) * r.kick * 0.08, rnd(-1, 1) * r.kick * 0.05, rnd(-1, 1) * r.kick * 0.08);
           r.kickAt = 0;
         }
@@ -1868,6 +1895,7 @@
           if (tw.land === 'big') {
             ring(t.pos, true); clack(1); tone(85, 0.35, 0.5); sfx('win', 0.9, S.fanfare);
             cam.shake = 1;
+            if (!S.reduced) blast(t.owner);
           } else if (tw.land) { ring(t.pos); sfx('discard', 0.8, () => clack(0.8)); t.bounce = now; }
         }
       } else if (t.bounce) {
