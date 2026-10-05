@@ -207,7 +207,8 @@
       if (type === 'call') S.say(d.text);
       if (win) { S.celebrate(d.pid); await sleep(prefs.reduced ? 1500 : 3200); }
       else {
-        if (type === 'call') S.focus(d.pid, 1000);
+        // 吃、碰鏡頭不動
+        if (type === 'call' && d.text !== '吃' && d.text !== '碰') S.focus(d.pid, 1000);
         // 自己摸牌不必等
         if (!(type === 'draw' && d.pid === 0)) await sleep(DELAY[type] * (prefs.reduced ? 0.6 : 1));
       }
