@@ -319,6 +319,16 @@
     }
     restUntil = performance.now() + 4000;
   }
+  // 會動的牌靠近時，旁邊還沒有剛體的牌也補一個，才不會直接穿過去
+  const WAKE_R = 8;
+  function wakeNear(b) {
+    if (b.velocity.lengthSquared() < 4) return;
+    for (const t of tiles) {
+      if (t.rest || t.tw || t.phys || !PHYS_ZONES.includes(t.zone)) continue;
+      const dx = t.g.position.x - b.position.x, dz = t.g.position.z - b.position.z;
+      if (dx * dx + dz * dz < WAKE_R * WAKE_R) restBody(t);
+    }
+  }
   // 桌上的牌比飛來的牌輕，一撞就飛
   function restBody(t) {
     const g = t.g, b = new C.Body({ mass: 0.35, shape: shapeFor(t.scale), collisionFilterGroup: G_REST, collisionFilterMask: HIT_TILES });
@@ -369,31 +379,91 @@
     t.rest = null;
   }
   const NUDGE = 1.1, NUDGE_YAW = 0.6, axA = new T.Vector3(), axB = new T.Vector3();
+  // 剛體停下的位置相對原位：水平位移和水平轉角
+  function yawFrom(q, home) {
+    axA.set(1, 0, 0).applyQuaternion(q);
+    axB.set(1, 0, 0).applyQuaternion(home.quat);
+    const yaw = Math.atan2(-axA.z, axA.x) - Math.atan2(-axB.z, axB.x);
+    return Math.atan2(Math.sin(yaw), Math.cos(yaw));
+  }
+  const nudgeTo = (n, f) => ({
+    pos: n.home.pos.clone().addScaledVector(n.off, f),
+    quat: n.home.quat.clone().premultiply(new T.Quaternion().setFromAxisAngle(Y, n.yaw * f)),
+    scale: n.t.scale,
+  });
+  // 兩張牌的方盒有沒有互相穿進去（分離軸測試），留一點縫當作貼著不算
+  const BOX_GAP = 0.04, satAx = [0, 1, 2, 3, 4, 5].map(() => new T.Vector3()), satL = new T.Vector3(), satD = new T.Vector3();
+  function boxesHit(p1, q1, s1, p2, q2, s2) {
+    satD.subVectors(p2, p1);
+    const e1 = [W / 2 * s1 - BOX_GAP, H / 2 * s1 - BOX_GAP, D / 2 * s1 - BOX_GAP];
+    const e2 = [W / 2 * s2 - BOX_GAP, H / 2 * s2 - BOX_GAP, D / 2 * s2 - BOX_GAP];
+    const r = Math.hypot(...e1) + Math.hypot(...e2);
+    if (satD.lengthSq() > r * r) return false;
+    const a = satAx;
+    a[0].set(1, 0, 0).applyQuaternion(q1); a[1].set(0, 1, 0).applyQuaternion(q1); a[2].set(0, 0, 1).applyQuaternion(q1);
+    a[3].set(1, 0, 0).applyQuaternion(q2); a[4].set(0, 1, 0).applyQuaternion(q2); a[5].set(0, 0, 1).applyQuaternion(q2);
+    const apart = L => {
+      if (L.lengthSq() < 1e-6) return false;
+      let ra = 0, rb = 0;
+      for (let i = 0; i < 3; i++) { ra += e1[i] * Math.abs(a[i].dot(L)); rb += e2[i] * Math.abs(a[i + 3].dot(L)); }
+      return Math.abs(satD.dot(L)) > ra + rb;
+    };
+    for (let i = 0; i < 6; i++) if (apart(a[i])) return false;
+    for (let i = 0; i < 3; i++) for (let j = 3; j < 6; j++) if (apart(satL.crossVectors(a[i], a[j]))) return false;
+    return true;
+  }
   // 撞完停下來：歪一點就留在那裡，像真的桌面；翻面、疊到別張上就推回原位
   // 只留水平位移和水平轉角，跑太遠的拉回一點，牌河才不會亂到看不懂
-  function settleRest(t) {
-    const r = t.rest, b = r.b;
-    endRest(t);
-    if (!r.moved) return;
-    const home = t.home || { pos: t.pos.clone(), quat: t.quat.clone() };
-    const q = new T.Quaternion(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
-    axA.set(0, 0, 1).applyQuaternion(q);
-    axB.set(0, 0, 1).applyQuaternion(home.quat);
-    const flat = axA.dot(axB) > 0.97 && Math.abs(b.position.y - home.pos.y) < 0.3;
-    const to = { pos: home.pos.clone(), quat: home.quat.clone(), scale: t.scale };
-    if (flat) {
+  // 一起收：每張歪掉的牌都要跟其他牌的落點比對，會穿到別張就少歪一點，最差退回原位
+  const NUDGE_STEPS = [1, 0.6, 0.3, 0];
+  function settleRests(list) {
+    const nudged = [], back = [];
+    for (const t of list) {
+      const r = t.rest, b = r.b;
+      endRest(t);
+      if (!r.moved) continue;
+      const home = t.home || { pos: t.pos.clone(), quat: t.quat.clone() };
+      const q = new T.Quaternion(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+      axA.set(0, 0, 1).applyQuaternion(q);
+      axB.set(0, 0, 1).applyQuaternion(home.quat);
+      const flat = axA.dot(axB) > 0.97 && Math.abs(b.position.y - home.pos.y) < 0.3;
+      if (!flat) { back.push({ t, home }); continue; }
       const off = new T.Vector3(b.position.x - home.pos.x, 0, b.position.z - home.pos.z);
       if (off.length() > NUDGE) off.setLength(NUDGE);
-      to.pos.add(off);
-      axA.set(1, 0, 0).applyQuaternion(q);
-      axB.set(1, 0, 0).applyQuaternion(home.quat);
-      let yaw = Math.atan2(-axA.z, axA.x) - Math.atan2(-axB.z, axB.x);
-      yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
-      yaw = Math.max(-NUDGE_YAW, Math.min(NUDGE_YAW, yaw));
-      to.quat.premultiply(new T.Quaternion().setFromAxisAngle(Y, yaw));
+      const yaw = Math.max(-NUDGE_YAW, Math.min(NUDGE_YAW, yawFrom(q, home)));
+      nudged.push({ t, home, off, yaw, step: 0, fresh: true });
     }
-    go(t, to, { dur: flat ? 160 : 320, arc: flat ? 0 : 1.5 });
-    t.home = home;
+    // 之前就歪著放的牌也一起重排，免得有牌回原位時撞上它
+    for (const t of tiles) {
+      if (!t.home || t.rest || t.phys || t.tw || nudged.some(n => n.t === t) || back.some(n => n.t === t)) continue;
+      const off = t.pos.clone().sub(t.home.pos);
+      nudged.push({ t, home: t.home, off, yaw: yawFrom(t.quat, t.home), step: 0, fresh: false });
+    }
+    const spot = new Map();
+    for (const t of tiles) if (!t.phys) spot.set(t, { pos: t.pos, quat: t.quat, scale: t.scale });
+    for (const { t, home } of back) spot.set(t, { pos: home.pos, quat: home.quat, scale: t.scale });
+    for (const n of nudged) spot.set(n.t, nudgeTo(n, 1));
+    const near = nudged.map(n => tiles.filter(o => o !== n.t && spot.has(o) && spot.get(o).pos.distanceToSquared(n.home.pos) < 100));
+    for (let pass = 0, changed = true; changed && pass < 8; pass++) {
+      changed = false;
+      nudged.forEach((n, i) => {
+        while (n.step < NUDGE_STEPS.length - 1) {
+          const me = spot.get(n.t);
+          if (!near[i].some(o => { const s = spot.get(o); return boxesHit(me.pos, me.quat, me.scale, s.pos, s.quat, s.scale); })) break;
+          spot.set(n.t, nudgeTo(n, NUDGE_STEPS[++n.step]));
+          changed = true;
+        }
+      });
+    }
+    for (const { t, home } of back) {
+      go(t, { pos: home.pos.clone(), quat: home.quat.clone(), scale: t.scale }, { dur: 320, arc: 1.5 });
+      t.home = home;
+    }
+    for (const n of nudged) {
+      if (!n.fresh && !n.step) continue;
+      go(n.t, spot.get(n.t), { dur: 160, arc: 0 });
+      n.t.home = n.home;
+    }
   }
 
   // ---- 桌上的小東西：籌碼、莊家牌 ----
@@ -1168,6 +1238,8 @@
         t.zone = s.zone; t.owner = s.owner; t.idx = s.idx; t.ring = s.ring;
       });
     }
+    // 牌搬到新位置後，旁邊歪著放的牌可能會穿到它，再收一次
+    settleRests([]);
     drawPlate();
   };
 
@@ -2081,6 +2153,7 @@
           p.b.angularVelocity.z += rnd(-9, 9) * p.pw;
           p.kick = 0;
         }
+        wakeNear(p.b);
         g.position.set(p.b.position.x, p.b.position.y, p.b.position.z);
         g.quaternion.set(p.b.quaternion.x, p.b.quaternion.y, p.b.quaternion.z, p.b.quaternion.w);
         g.scale.setScalar(g.scale.x + (1 - g.scale.x) * 0.25);
@@ -2097,7 +2170,7 @@
           b.angularVelocity.set(rnd(-1, 1) * r.kick * 0.08, rnd(-1, 1) * r.kick * 0.05, rnd(-1, 1) * r.kick * 0.08);
           r.kickAt = 0;
         }
-        if (b.sleepState !== C.Body.SLEEPING) r.moved = true;
+        if (b.sleepState !== C.Body.SLEEPING) { r.moved = true; wakeNear(b); }
         if (r.moved) {
           g.position.set(b.position.x, b.position.y, b.position.z);
           g.quaternion.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
@@ -2143,7 +2216,7 @@
     // 沒有牌在飛、被撞的也都停了，就把桌上的剛體收掉
     if (resting.length && !tiles.some(t => t.phys)) {
       const calm = resting.every(t => t.rest.b.sleepState === C.Body.SLEEPING && !t.rest.kickAt);
-      if (calm || now > restUntil) for (const t of resting.slice()) settleRest(t);
+      if (calm || now > restUntil) settleRests(resting.slice());
     }
 
     // 蓄力中：牌提起來越抖越兇，上方顯示力道條
