@@ -40,11 +40,11 @@
   const IVORY = 0xece4cf;
   const tiles = [], byKind = [], dice = [];
   const raycaster = new T.Raycaster(), mouse = new T.Vector2();
-  let hover = -1, marker, plateCtx, plateTex, sparks, sparkLife = 0;
+  let hover = -1, hoverKind = -1, haloMat, marker, plateCtx, plateTex, sparks, sparkLife = 0;
   // 蓄力甩牌：按住自己的牌不放，力道在 0 和 1 之間來回擺盪，放開就打出去
   const CHARGE_DELAY = 170, CHARGE_MS = 900;
   let charge = null, meter = null;
-  const sparkVel = [], rings = [];
+  const sparkVel = [], rings = [], up = new T.Vector3();
   const cam = { yaw: 0, zoom: 1, yawTo: 0, zoomTo: 1, fit: 1, shake: 0 };
 
   // ---- 建立場景 ----
@@ -706,6 +706,15 @@
     shx.fillRect(14, 14, 36, 36);
     const shTex = new T.CanvasTexture(shc), shGeo = new T.PlaneGeometry(1, 1);
     const jadeMat = new T.MeshPhysicalMaterial(Object.assign({ color: 0x27916a }, gloss));
+    // 滑到手牌上時，桌面上同一種牌底下亮起的金色光暈
+    const hc = document.createElement('canvas');
+    hc.width = 96; hc.height = 120;
+    const hx = hc.getContext('2d');
+    hx.filter = 'blur(9px)';
+    hx.fillStyle = '#ffd36a';
+    hx.fillRect(16, 16, 64, 88);
+    haloMat = new T.MeshBasicMaterial({ map: new T.CanvasTexture(hc), transparent: true, depthWrite: false, blending: T.AdditiveBlending });
+    const haloGeo = new T.PlaneGeometry(W * 1.9, H * 1.7);
     for (let kind = 0; kind < 42; kind++) {
       byKind[kind] = [];
       const ft = faceTextures(kind);
@@ -715,7 +724,10 @@
         const a = new T.Mesh(ivoryGeo, ivoryMat), b = new T.Mesh(jadeGeo, jadeMat), f = new T.Mesh(faceGeo, faceMat);
         f.position.z = D / 2 + 0.008;
         a.castShadow = b.castShadow = a.receiveShadow = b.receiveShadow = true;
-        g.add(a, b, f);
+        const halo = new T.Mesh(haloGeo, haloMat);
+        halo.position.z = -D / 2 + 0.06;
+        halo.visible = false;
+        g.add(a, b, f, halo);
         scene.add(g);
         const sh = new T.Mesh(shGeo, new T.MeshBasicMaterial({ map: shTex, transparent: true, depthWrite: false, opacity: 0 }));
         sh.rotation.order = 'YXZ';
@@ -785,9 +797,11 @@
     canvas.addEventListener('pointermove', e => {
       const idx = pick(e);
       canvas.style.cursor = idx >= 0 ? 'pointer' : '';
+      const ht = handTileAt(e);
+      hoverKind = ht ? ht.kind : -1;
       if (idx !== hover) { hover = idx; if (game) S.sync(); }
     });
-    canvas.addEventListener('pointerleave', () => { if (hover !== -1) { hover = -1; if (game) S.sync(); } });
+    canvas.addEventListener('pointerleave', () => { hoverKind = -1; if (hover !== -1) { hover = -1; if (game) S.sync(); } });
     // 快點一下照舊（選取、再點一次打出，直接擺進牌池）；按住不放就是蓄力，放開把那張甩出去
     meter = document.getElementById('power');
     canvas.addEventListener('pointerdown', e => {
@@ -830,12 +844,19 @@
 
   function pick(e) {
     if (!S.pickable) return -1;
+    const t = handTileAt(e);
+    return t ? t.idx : -1;
+  }
+
+  // 游標底下是我哪張手牌（不管現在能不能出牌）
+  function handTileAt(e) {
+    if (!game) return null;
     const r = renderer.domElement.getBoundingClientRect();
     mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     raycaster.setFromCamera(mouse, camera);
     const mine = tiles.filter(t => t.zone === 'hand' && t.owner === 0).map(t => t.g);
-    const hit = raycaster.intersectObjects(mine, true)[0];
-    return hit ? hit.object.parent.userData.tile.idx : -1;
+    const hit = raycaster.intersectObjects(mine, true).find(h => h.object.visible);
+    return hit ? hit.object.parent.userData.tile : null;
   }
 
   // 桌上的點在螢幕上的位置：一律以鏡頭的歸位姿勢計算，標示才不會跟著運鏡飄
@@ -1813,6 +1834,17 @@
       }
     }
     marker.visible = show;
+
+    // 同種牌的光暈：只亮桌上翻開的牌（牌河、吃碰槓、花、攤牌），蓋著的不亮
+    haloMat.opacity = 0.65 + Math.sin(now / 220) * 0.25;
+    for (const t of tiles) {
+      let on = false;
+      if (hoverKind >= 0 && t.kind === hoverKind && t.zone !== 'wall' && !(t.zone === 'hand' && t.owner === 0)) {
+        up.set(0, 0, 1).applyQuaternion(t.g.quaternion);
+        on = up.y > 0.7;
+      }
+      t.g.children[3].visible = on;
+    }
 
     if (sparkLife > 0) {
       sparkLife -= dt;
