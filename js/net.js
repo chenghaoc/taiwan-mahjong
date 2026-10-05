@@ -99,6 +99,8 @@
     view: viewer(),
     // 放在靜態網站上時沒有牌桌主機，就不顯示連線選項
     available: () => fetch('api/ping').then(r => r.json()).then(j => !!j.mahjong, () => false),
+    // 總排行榜；主機沒接資料庫時 enabled 是 false
+    scores: () => fetch('api/scores').then(r => r.json()).catch(() => ({ enabled: false, rows: [] })),
     open(name, handle) {
       id = sessionStorage.mjId || (sessionStorage.mjId = Math.random().toString(36).slice(2));
       const mine = es = new EventSource(`api/events?room=${encodeURIComponent(room())}&id=${id}&name=${encodeURIComponent(name)}`);

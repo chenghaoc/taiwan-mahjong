@@ -354,22 +354,35 @@
         $('#overlay').hidden = true;
         done(html);
       };
+      // 等候室下方的總排行榜：進等候室、打完一將回來時各抓一次
+      let lobbyMsg = null, board = '';
+      const lobby = m => {
+        lobbyMsg = m;
+        const host = m.host === m.me, links = MJ.net.links(m.urls);
+        S.idle = true;
+        sheet('<h1>等候室</h1>' +
+          (links.length ? `<p>請其他人用瀏覽器打開 ${links.map(u => `<b>${u}</b>`).join(' 或 ')}</p>` : '') +
+          `<table>${m.seats.map((n, i) => `<tr><td>${n || '電腦'}</td><td>${i === m.me ? '你' : ''}${i === m.host ? '　房主' : ''}</td></tr>`).join('')}</table>` +
+          (host ? '' : '<p>等房主開始…</p>') + '<div class="btns">' +
+          (host ? '<button class="btn win" data-v="1">打一圈</button><button class="btn" data-v="4">打四圈（一將）</button>' : '') +
+          '<button class="btn" data-v="leave">離開</button></div>' + board,
+        e => {
+          const b = e.target.closest('button[data-v]');
+          if (!b) return;
+          if (b.dataset.v === 'leave') leave('');
+          else MJ.net.send({ t: 'start', rounds: Number(b.dataset.v) });
+        });
+      };
+      const loadBoard = () => MJ.net.scores().then(j => {
+        board = j.enabled && j.rows.length ? '<h2>總排行榜</h2><table>' + j.rows.map((r, i) =>
+          `<tr><td>第 ${i + 1} 名</td><td>${cleanName(r.name)}</td><td class="n ${r.total > 0 ? 'plus' : r.total < 0 ? 'minus' : ''}">${signed(r.total)}</td><td>${r.wins}/${r.hands} 胡</td></tr>`).join('') + '</table>' : '';
+        if (lobbyMsg) lobby(lobbyMsg);
+      });
+      loadBoard();
       MJ.net.open(name, async m => {
+        if (m.t !== 'lobby') lobbyMsg = null;
         if (m.t === 'lobby') {
-          const host = m.host === m.me, links = MJ.net.links(m.urls);
-          S.idle = true;
-          sheet('<h1>等候室</h1>' +
-            (links.length ? `<p>請其他人用瀏覽器打開 ${links.map(u => `<b>${u}</b>`).join(' 或 ')}</p>` : '') +
-            `<table>${m.seats.map((n, i) => `<tr><td>${n || '電腦'}</td><td>${i === m.me ? '你' : ''}${i === m.host ? '　房主' : ''}</td></tr>`).join('')}</table>` +
-            (host ? '' : '<p>等房主開始…</p>') + '<div class="btns">' +
-            (host ? '<button class="btn win" data-v="1">打一圈</button><button class="btn" data-v="4">打四圈（一將）</button>' : '') +
-            '<button class="btn" data-v="leave">離開</button></div>',
-          e => {
-            const b = e.target.closest('button[data-v]');
-            if (!b) return;
-            if (b.dataset.v === 'leave') leave('');
-            else MJ.net.send({ t: 'start', rounds: Number(b.dataset.v) });
-          });
+          lobby(m);
         } else if (m.t === 'event') {
           show(m.state, m.type === 'deal');
           if (m.type === 'deal') { $('#overlay').hidden = true; $('#hud').hidden = false; }
@@ -393,6 +406,7 @@
           showResult(m.r).then(() => {
             $('#back').hidden = true; MJ.net.send({ t: 'next' }); sheet('<p>等其他人按下一局…</p>'); });
         } else if (m.t === 'over') {
+          loadBoard();
           show(m.state);
           refresh();
           S.idle = true;

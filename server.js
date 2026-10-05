@@ -5,6 +5,7 @@ const http = require('http'), fs = require('fs'), path = require('path'), os = r
 require('./js/rules.js');
 require('./js/ai.js');
 require('./js/game.js');
+const scores = require('./scores.js');
 const MJ = globalThis.MJ;
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -124,6 +125,7 @@ class Room {
       while (!game.over) {
         this.reveal = -1;
         const r = await game.playHand();
+        scores.add(this.seats.map((s, i) => s && { name: s.name, delta: r.deltas[i], win: r.type === 'win' && r.winner === i }).filter(Boolean));
         await this.result(r);
         game.advance(r);
       }
@@ -245,6 +247,11 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/ping') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"mahjong":true}');
+  } else if (url.pathname === '/api/scores') {
+    scores.top().then(j => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+      res.end(JSON.stringify(j));
+    });
   } else if (url.pathname === '/api/events') {
     // X-Accel-Buffering：請代理伺服器不要把訊息攢著不送
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
