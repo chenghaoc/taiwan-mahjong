@@ -788,7 +788,7 @@
       if (idx !== hover) { hover = idx; if (game) S.sync(); }
     });
     canvas.addEventListener('pointerleave', () => { if (hover !== -1) { hover = -1; if (game) S.sync(); } });
-    // 快點一下照舊（選取、再點一次打出）；按住不放就是蓄力，放開把那張甩出去
+    // 快點一下照舊（選取、再點一次打出，直接擺進牌池）；按住不放就是蓄力，放開把那張甩出去
     meter = document.getElementById('power');
     canvas.addEventListener('pointerdown', e => {
       if (e.button !== 0 || charge) return;
@@ -977,6 +977,8 @@
       const hand = other && hands[slot.owner];
       let power = null;
       if (!other && S.throwPower != null) { power = S.throwPower; S.throwPower = null; }
+      // 自己快點出牌：不甩，直接擺到牌池該放的位置；按住蓄力才真的甩出去
+      if (!other && power == null) return { dur: 380, arc: 4, land: true };
       return { phys: true, dur: 300, arc: 4, land: true, pre: hand ? 560 : other ? 240 : 0, grab: hand ? 340 : 0, power };
     }
     // 吃碰槓：被叫的那張貼著桌面滑過去，手裡的牌翻開跟上
