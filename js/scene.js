@@ -1742,14 +1742,14 @@
 
   // ---- 貓掌 ----
   // 程式產生，不用模型檔。座標直接用桌上單位，跟 handBasis 轉完的人手一樣：腳趾朝 -z、肉球朝下、手腕在原點。
-  // 掌、手腕、前腳、四根腳趾、懸趾是一團團橢球，合成一個蒙皮網格，四根腳趾各掛一根骨頭來彎。
+  // 掌、手腕、前腳、四根腳趾是一團團橢球，合成一個蒙皮網格，四根腳趾各掛一根骨頭來彎。
   // 毛用外殼法：同一份網格沿法線往外疊 FUR_SHELLS 層，越外層留下的毛越少，疊出一根根尖尖的毛。
   // 肉球和爪子是另外的小網格，掛在骨頭上；爪子只有抓牌時才伸出來。
   // 三家的貓：毛色、虎斑條紋色與濃淡、掌底與肚子的顏色、白手套、肉球顏色、大小
   const CATS = [null,
-    { fur: 0xdf9148, stripe: 0x9a4f20, belly: 0xf4d6ae, stripes: 1, mitten: 0, bean: 0xd88a80, size: 0.92 },   // 阿明：橘虎斑
-    { fur: 0xf5f0e8, stripe: 0xe4d3bd, belly: 0xfbf8f3, stripes: 0.3, mitten: 0, bean: 0xf49aa7, size: 0.8 }, // 美玲：白貓
-    { fur: 0x1f1d21, stripe: 0x151317, belly: 0x2a272c, stripes: 0, mitten: 1, bean: 0xe5939b, size: 0.86 },      // 老陳：賓士貓，白手套
+    { fur: 0xf0a560, stripe: 0xc8743a, belly: 0xfbe6c8, stripes: 0.8, mitten: 0, bean: 0xf7a0a4, size: 0.92 },  // 阿明：橘虎斑
+    { fur: 0xfbf7f1, stripe: 0xefe2d0, belly: 0xffffff, stripes: 0.3, mitten: 0, bean: 0xffb3c1, size: 0.8 },  // 美玲：白貓
+    { fur: 0x2a272d, stripe: 0x1f1d22, belly: 0x36323a, stripes: 0, mitten: 1, bean: 0xf6a3b0, size: 0.86 },   // 老陳：賓士貓，白手套
   ];
   const CAT_REST = { p: [33, 1.2, 55], yaw: 0.3, pitch: 0.05, roll: 0, c: 0 };
   const CAT_STANCES = {
@@ -1761,28 +1761,28 @@
       L: { p: [14, 12, 47], yaw: 0.15, pitch: 1.0, roll: 0, c: 1.55, beckon: true },
     },
   };
-  const FUR_SHELLS = 16, FUR_LEN = 0.3;
+  const FUR_SHELLS = 22, FUR_LEN = 0.6;
   const WRIST = new T.Vector3(0, 2.4, 0.6), LEG_DIR = new T.Vector3(0, 0.42, 1).normalize();
-  const TOES = [[-2.15, -5.15], [-0.74, -5.95], [0.74, -5.95], [2.15, -5.15]];   // 各腳趾中心的 x、z
-  const TOE_Y = 1.0;
+  const TOES = [[-2.2, -5.0], [-0.76, -5.85], [0.76, -5.85], [2.2, -5.0]];   // 各腳趾中心的 x、z
+  const TOE_Y = 1.05;
 
   // 一團團橢球 → 一份含 FUR_SHELLS 層的網格；aShell 是第幾層（0 是皮、1 是毛尖）
-  function pawGeometry(side) {
+  function pawGeometry() {
     const parts = [];
-    // 每團要疊 FUR_SHELLS 層，面數省著用：小團（腳趾、懸趾）分段少一點
+    // 每團要疊 FUR_SHELLS 層，面數省著用：小團（腳趾）分段少一點
     const blob = (bone, at, r) => {
       const seg = r[0] > 2 ? 24 : 16;
       parts.push({ bone, g: new T.SphereGeometry(1, seg, seg * 0.7 | 0).scale(r[0], r[1], r[2]).translate(at[0], at[1], at[2]) });
     };
-    blob(0, [0, 1.75, -2.7], [3.1, 1.75, 3.4]);           // 掌
-    blob(0, [0, 2.4, 0.5], [2.6, 2.1, 2.6]);              // 手腕
-    blob(0, [-side * 2.7, 1.7, 0.4], [0.6, 0.55, 0.75]);  // 懸趾（內側那根小指頭）
+    // 圓滾滾的：掌胖胖的像饅頭，腳趾大顆擠在一起
+    blob(0, [0, 1.85, -2.6], [3.3, 1.9, 3.4]);            // 掌
+    blob(0, [0, 2.5, 0.4], [2.85, 2.3, 2.8]);             // 手腕
     // 前腳：從手腕往後上方伸出去，在 FUR 的 shader 裡淡掉
-    const leg = new T.CapsuleGeometry(2.4, 16, 8, 24).scale(1.05, 1, 0.95)
+    const leg = new T.CapsuleGeometry(2.55, 16, 8, 24).scale(1.08, 1, 1)
       .applyQuaternion(new T.Quaternion().setFromUnitVectors(Y, LEG_DIR));
     leg.translate(WRIST.x + LEG_DIR.x * 8, WRIST.y + LEG_DIR.y * 8, WRIST.z + LEG_DIR.z * 8);
     parts.push({ bone: 0, g: leg });
-    TOES.forEach(([x, z], i) => blob(i + 1, [x, TOE_Y, z], i === 0 || i === 3 ? [0.98, 0.84, 1.05] : [1.02, 0.86, 1.1]));
+    TOES.forEach(([x, z], i) => blob(i + 1, [x, TOE_Y, z], i === 0 || i === 3 ? [1.08, 0.95, 1.1] : [1.14, 0.98, 1.15]));
 
     const pos = [], nrm = [], skin = [], wt = [], shell = [], idx = [];
     let base = 0;
@@ -1825,22 +1825,23 @@
     // 前腳往後漸漸淡掉（網點）
     float legT = dot(vFurPos - uWrist, uLegDir);
     if (1.0 - smoothstep(4.5, 10.0, legT) < fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))) discard;
-    // 一根毛一個小格子，每根長短不一，越往毛尖越細
-    vec3 fCell = floor(vFurPos * 16.0), fIn = fract(vFurPos * 16.0) - 0.5;
-    float strand = fHash(fCell), tip = vFurH / (0.35 + 0.65 * strand);
-    if (vFurH > 0.0 && (tip > 1.0 || length(fIn) > 0.8 * (1.0 - tip))) discard;
-    // 花色：背上的虎斑一圈圈繞著腳，掌底和肚子比較淡，賓士貓的白手套
+    // 一根毛一個小格子，每根長短不一；根部密、毛尖細細的散開，看起來蓬蓬的
+    vec3 fCell = floor(vFurPos * 26.0), fIn = fract(vFurPos * 26.0) - 0.5;
+    float strand = fHash(fCell), tip = vFurH / (0.3 + 0.7 * strand);
+    if (vFurH > 0.0 && (tip > 1.0 || length(fIn) > 0.9 * pow(1.0 - tip, 0.5))) discard;
+    // 花色：背上的虎斑一圈圈繞著腳（邊緣糊糊的），掌底和肚子比較淡，賓士貓的白手套
     vec3 n0 = normalize(vFurNrm);
     float nz = fNoise(vFurPos * 0.8);
     float under = smoothstep(0.0, -0.7, n0.y);
-    float band = smoothstep(0.3, 0.85, sin(legT * 1.6 + nz * 3.5 + vFurPos.x * 0.35)) * uStripes * (1.0 - under);
+    float band = smoothstep(0.1, 0.95, sin(legT * 1.6 + nz * 3.5 + vFurPos.x * 0.35)) * uStripes * (1.0 - under);
     vec3 fc = mix(uFur, uStripe, band);
     fc = mix(fc, uBelly, under * 0.8);
     float mitten = uMitten * smoothstep(1.4, 0.2, legT + (nz - 0.5) * 2.0);
     fc = mix(fc, vec3(0.93, 0.91, 0.88), mitten);
-    // 每根毛深淺略有不同；毛根處被擋住光，比較暗
-    fc *= 0.94 + 0.12 * fHash(fCell + 3.1);
-    fc *= mix(0.72, 1.0, pow(vFurH, 0.7));
+    // 每根毛深淺略有不同；毛根處被擋住光，比較暗；毛尖透光，亮亮軟軟的
+    fc *= 0.95 + 0.1 * fHash(fCell + 3.1);
+    fc *= mix(0.8, 1.0, pow(vFurH, 0.6));
+    fc = mix(fc, min(fc * 1.15 + 0.05, vec3(1.0)), vFurH * vFurH);
     diffuseColor.rgb = fc;
   `;
   const FUR_MATS = [];
@@ -1848,8 +1849,8 @@
     if (FUR_MATS[pid]) return FUR_MATS[pid];
     const cat = CATS[pid];
     const m = new T.MeshPhysicalMaterial({
-      color: 0xffffff, roughness: 0.85, sheen: 0.8, sheenRoughness: 0.6,
-      sheenColor: new T.Color(cat.fur).lerp(new T.Color(0xffffff), 0.5), envMapIntensity: 0.3,
+      color: 0xffffff, roughness: 0.9, sheen: 1, sheenRoughness: 0.5,
+      sheenColor: new T.Color(cat.fur).lerp(new T.Color(0xffffff), 0.6), envMapIntensity: 0.3,
     });
     m.onBeforeCompile = sh => {
       Object.assign(sh.uniforms, {
@@ -1857,12 +1858,14 @@
         uStripes: { value: cat.stripes }, uMitten: { value: cat.mitten },
         uWrist: { value: WRIST }, uLegDir: { value: LEG_DIR }, uFurLen: { value: FUR_LEN },
       });
-      sh.vertexShader = 'attribute float aShell;\nvarying vec3 vFurPos;\nvarying vec3 vFurNrm;\nvarying float vFurH;\nuniform float uFurLen;\n' +
+      sh.vertexShader = FUR_GLSL + 'attribute float aShell;\nuniform float uFurLen;\n' +
         sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
           vFurPos = position; vFurNrm = normal; vFurH = aShell;
-          // 掌底的毛短；毛往後（前腳的方向）梳，微微下垂
-          float fLen = uFurLen * mix(0.3, 1.0, smoothstep(-0.7, 0.1, normal.y)) * aShell;
-          transformed += normal * fLen + vec3(0.0, -0.35, 0.6) * fLen * aShell;`);
+          // 掌底的毛短；毛一撮一撮長短不一，輪廓毛茸茸的；往後（前腳的方向）輕輕梳，微微下垂
+          float fClump = fNoise(position * 1.4);
+          float fLen = uFurLen * mix(0.3, 1.0, smoothstep(-0.7, 0.1, normal.y)) * (0.6 + 0.8 * fClump) * aShell;
+          vec3 fFlow = vec3(0.0, -0.2, 0.35) + (vec3(fNoise(position * 0.9 + 7.0), fNoise(position * 0.9 + 3.0), fNoise(position * 0.9 + 1.0)) - 0.5) * 0.5;
+          transformed += normal * fLen + fFlow * fLen * aShell;`);
       sh.fragmentShader = FUR_GLSL + sh.fragmentShader.replace('#include <color_fragment>', FUR_COLOR);
     };
     return (FUR_MATS[pid] = m);
@@ -1887,7 +1890,7 @@
   const pawMat = (k, o) => PAW_MATS[k] || (PAW_MATS[k] = new T.MeshPhysicalMaterial(o));
   function makePaw(pid, side) {
     const cat = CATS[pid];
-    const mesh = new T.SkinnedMesh(pawGeometry(side), furMaterial(pid));
+    const mesh = new T.SkinnedMesh(pawGeometry(), furMaterial(pid));
     mesh.castShadow = true;
     mesh.customDepthMaterial = furDepthMaterial();
     mesh.frustumCulled = false;
@@ -1903,10 +1906,10 @@
     mesh.updateMatrixWorld(true);
     mesh.bind(new T.Skeleton([root, ...toes]));
 
-    // 肉球：粉粉亮亮的，從毛裡凸出來；座標是掛上去那根骨頭的座標
+    // 肉球：粉粉嫩嫩、Q彈亮亮的，從毛裡凸出來；座標是掛上去那根骨頭的座標
     const bean = pawMat('bean' + pid, {
-      color: cat.bean, roughness: 0.45, clearcoat: 0.3, clearcoatRoughness: 0.35,
-      sheen: 0.4, sheenColor: new T.Color(0xffd0d6), envMapIntensity: 0.4,
+      color: cat.bean, roughness: 0.4, clearcoat: 0.7, clearcoatRoughness: 0.25,
+      sheen: 0.6, sheenColor: new T.Color(0xffe0e6), envMapIntensity: 0.5,
     });
     const pad = (parent, at, r) => {
       const m = new T.Mesh(padGeo || (padGeo = new T.SphereGeometry(1, 20, 14)), bean);
@@ -1917,18 +1920,17 @@
       return m;
     };
     // 掌心的大肉球：三瓣的愛心形
-    const mainPad = pad(root, [0, 0.1, -2.5], [1.1, 0.4, 0.88]);
-    pad(root, [-0.85, 0.16, -2.8], [0.72, 0.36, 0.68]);
-    pad(root, [0.85, 0.16, -2.8], [0.72, 0.36, 0.68]);
-    pad(root, [-side * 2.75, 1.25, 0.25], [0.32, 0.22, 0.35]);   // 懸趾的小肉球
+    const mainPad = pad(root, [0, 0.05, -2.45], [1.25, 0.46, 1.0]);
+    pad(root, [-0.95, 0.12, -2.8], [0.8, 0.42, 0.76]);
+    pad(root, [0.95, 0.12, -2.8], [0.8, 0.42, 0.76]);
     const claw = pawMat('claw', { color: 0xf3ede2, roughness: 0.3, clearcoat: 0.6 });
     const claws = [], beans = [];
     TOES.forEach(([x, z], i) => {
       const b = toes[i];
-      beans.push(pad(b, [x, TOE_Y - 0.74, z + 0.15], [0.58, 0.34, 0.64]));
-      // 爪子：藏在腳趾前端，抓牌時伸出來
-      const c = new T.Mesh(new T.ConeGeometry(0.13, 0.75, 8).translate(0, 0.37, 0).rotateX(-Math.PI / 2 - 0.5), claw);
-      c.position.set(x, TOE_Y - 0.3, z - 0.75).sub(b.position);
+      beans.push(pad(b, [x, TOE_Y - 0.8, z + 0.1], [0.68, 0.4, 0.72]));
+      // 爪子：小小的，藏在腳趾前端，抓牌時伸出來
+      const c = new T.Mesh(new T.ConeGeometry(0.11, 0.5, 8).translate(0, 0.25, 0).rotateX(-Math.PI / 2 - 0.5), claw);
+      c.position.set(x, TOE_Y - 0.3, z - 0.95).sub(b.position);
       c.scale.setScalar(0.001);
       b.add(c);
       claws.push(c);
@@ -1936,7 +1938,7 @@
 
     // c：0 放鬆、1 抓牌（腳趾張開往下扣、爪子伸出）、更大是握起來（招手）
     const pose = c => {
-      const curl = -0.12 - 0.5 * Math.min(c, 1) - 0.8 * Math.max(0, c - 1);
+      const curl = -0.12 - 0.5 * Math.min(c, 1) - 0.55 * Math.max(0, c - 1);
       const spread = Math.max(0, Math.min(c, 1) - 3 * Math.max(0, c - 1));
       const out = smooth(Math.min(1, Math.max(0, (c - 0.55) / 0.45))) * (1 - smooth(Math.min(1, Math.max(0, (c - 1.02) / 0.2))));
       toes.forEach((b, i) => {
