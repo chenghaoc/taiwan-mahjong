@@ -629,7 +629,6 @@
 
   S.init = canvas => {
     renderer = new T.WebGLRenderer({ canvas, antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = T.PCFSoftShadowMap;
     scene = new T.Scene();
@@ -835,6 +834,9 @@
 
   function resize() {
     const w = window.innerWidth, h = window.innerHeight;
+    // 桌機最多 2 倍；手機螢幕小、像素密，給到原生倍率才不會糊（總像素約 330 萬為上限）
+    const dpr = window.devicePixelRatio || 1;
+    renderer.setPixelRatio(Math.min(dpr, Math.max(2, Math.sqrt(3.3e6 / (w * h)))));
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
