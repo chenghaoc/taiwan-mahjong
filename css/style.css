@@ -122,7 +122,24 @@ body {
 }
 .tip.best { background: var(--gold); color: var(--ink); font-weight: 700; }
 .dim { opacity: 0.6; }
-#hint small { margin-right: calc(var(--u) * 0.5); opacity: 0.8; }
+#hint small, #ting small { margin-right: calc(var(--u) * 0.5); opacity: 0.8; }
+
+/* 聽牌：畫面中央偏下，金框、字與牌放大 */
+#ting {
+  position: absolute; left: 50%; bottom: 36vh; transform: translateX(-50%);
+  display: flex; align-items: center; gap: calc(var(--u) * 0.6);
+  padding: calc(var(--u) * 0.6) calc(var(--u) * 1.6);
+  border-radius: calc(var(--u) * 1.4);
+  background: rgba(8, 26, 25, 0.86);
+  outline: calc(var(--u) * 0.15) solid var(--gold);
+  box-shadow: 0 calc(var(--u) * 0.5) calc(var(--u) * 2) rgba(0, 0, 0, 0.5);
+  font-size: calc(var(--u) * 1.9);
+  white-space: nowrap;
+  animation: ting-in 0.25s ease-out;
+}
+#ting b { margin-right: calc(var(--u) * 0.4); font-family: var(--kai); font-size: calc(var(--u) * 2.6); color: var(--gold); }
+#ting .t-xs { --w: calc(var(--u) * 2.6); }
+@keyframes ting-in { from { opacity: 0; transform: translateX(-50%) translateY(calc(var(--u) * 1.5)); } }
 .tile.dead { filter: grayscale(1) brightness(0.6); }
 
 /* 胡牌後數台 */
