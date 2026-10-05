@@ -427,6 +427,16 @@
     });
   }
 
+  // 手機：按下開始時順便全螢幕並鎖橫向（Android 可以；iPhone 不支援就算了）
+  function landscape() {
+    if (!window.matchMedia('(pointer: coarse)').matches || document.fullscreenElement) return;
+    const el = document.documentElement;
+    if (!el.requestFullscreen) return;
+    el.requestFullscreen({ navigationUI: 'hide' })
+      .then(() => screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape'))
+      .catch(() => {});
+  }
+
   async function main() {
     S.init($('#stage'));
     applyPrefs();
@@ -435,6 +445,7 @@
     for (;;) {
       const v = await showStart(extra, lan);
       S.audio();
+      landscape();
       extra = v === 'net' ? await playNet() : await playLocal(Number(v));
     }
   }
