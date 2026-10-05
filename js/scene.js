@@ -404,7 +404,7 @@
   // 讓道具沿拋物線飛到定點
   function fly(obj, to, o) {
     const k = S.reduced ? 0.4 : 1;
-    props.push({ obj, p0: obj.position.clone(), p1: to.clone(), t0: performance.now() + (o.delay || 0) * k, dur: o.dur * k, arc: (o.arc || 0) * k, done: o.done });
+    props.push({ obj, p0: obj.position.clone(), p1: to.clone(), t0: performance.now() + (o.delay || 0) * k, dur: o.dur * k, arc: (o.arc || 0) * k, flip: o.flip || 0, done: o.done });
   }
   const dealerSpot = pid => place(pid, -32.5, 0.7, 38, Q_STAND).pos;
   function buildProps() {
@@ -456,6 +456,8 @@
   }
   // 讓桌上的籌碼等於每家現在的現金：多的從牌堆頂拿走飛給不夠的人，找零的直接換
   function syncChips(animate) {
+    // 籌碼要歸位了：手上拿著的那枚先放掉，被玩亂的全部飛回自己那疊
+    toy = null;
     const want = stacks.map((_, pid) => chipCounts(STAKE + (game ? game.players[pid].score : 0)));
     const fresh = new Set();
     DENOMS.forEach((_, d) => {
@@ -482,10 +484,12 @@
       let col = 0;
       s.forEach(list => {
         list.forEach((chip, j) => {
+          chip.userData.loose = false;
+          chip.rotation.set(0, 0, 0);
           const c = col + Math.floor(j / 10);
           const to = place(pid, -39.5 + (c % 4) * 2.5, 0.15 + (j % 10) * 0.3, 31 + Math.floor(c / 4) * 2.5, Q_STAND).pos;
           if (!animate || fresh.has(chip)) chip.position.copy(to);
-          else if (chip.position.distanceTo(to) > 0.01) fly(chip, to, { dur: 520, arc: 9, delay: moved++ * 80, done: () => tone(rnd(2300, 2900), 0.07, 0.12, 'triangle') });
+          else if (chip.position.distanceTo(to) > 0.01) fly(chip, to, { dur: 520, arc: 9, delay: moved++ * 80, done: () => clink(0.12) });
         });
         col += Math.ceil(list.length / 10);
       });
@@ -493,6 +497,108 @@
   }
   // 結算：輸家把錢推給贏家
   S.pay = () => syncChips(true);
+
+  // ---- 等別人的時候玩一下：籌碼可以拖著滿桌跑、點一下拋硬幣；桌上的牌點一下會被輕輕推開 ----
+  const CHIP_H = 0.3, CHIP_LIFT = 4, CHIP_REACH = HALF - 4;
+  const DOWN = new T.Vector3(0, -1, 0), downRay = new T.Raycaster(), rayFrom = new T.Vector3();
+  const dragPlane = new T.Plane(Y, -CHIP_LIFT);
+  let toy = null, nextFall = 0;
+  const clink = v => tone(rnd(2300, 2900), 0.07, v, 'triangle');
+  const allChips = () => stacks.flatMap(s => s.flat());
+  const busy = chip => props.some(a => a.obj === chip);
+  // 同一疊（xz 幾乎重合）裡最上面那枚
+  function columnTop(chip, skip) {
+    let top = chip;
+    for (const c of allChips()) {
+      if (c === skip || busy(c) || Math.hypot(c.position.x - chip.position.x, c.position.z - chip.position.z) > 0.5) continue;
+      if (c.position.y > top.position.y) top = c;
+    }
+    return top;
+  }
+  // 從 from 高度往下找第一個能放籌碼的面（牌或桌面），回傳籌碼中心該在的高度
+  function groundAt(x, z, from) {
+    downRay.set(rayFrom.set(x, from, z), DOWN);
+    const hit = downRay.intersectObjects(tiles.map(t => t.g), true).find(h => h.object.visible);
+    return (hit ? hit.point.y : 0) + CHIP_H / 2;
+  }
+  // 放手的位置：旁邊有籌碼就疊上去，不然落在底下的牌或桌面上
+  function landAt(x, z, self) {
+    let near = null, nd = 1.6;
+    for (const c of allChips()) {
+      if (c === self || busy(c)) continue;
+      const d = Math.hypot(c.position.x - x, c.position.z - z);
+      if (d < nd) { nd = d; near = c; }
+    }
+    if (near) {
+      const top = columnTop(near, self);
+      return new T.Vector3(top.position.x + rnd(-0.06, 0.06), top.position.y + CHIP_H, top.position.z + rnd(-0.06, 0.06));
+    }
+    return new T.Vector3(x, groundAt(x, z, 40), z);
+  }
+  // 被玩過的籌碼底下的東西移走了（牌被摸走、底下那枚被拿走）就掉下去
+  function dropLoose() {
+    for (const c of allChips()) {
+      if (!c.userData.loose || busy(c) || (toy && toy.chip === c)) continue;
+      const p = c.position;
+      // 籌碼本身不在射線的目標裡，從中心往下打就是它底下那個面
+      let s = groundAt(p.x, p.z, p.y);
+      for (const o of allChips()) {
+        if (o === c || o.position.y > p.y - 0.1 || Math.hypot(o.position.x - p.x, o.position.z - p.z) > 0.9) continue;
+        s = Math.max(s, o.position.y + CHIP_H);
+      }
+      if (p.y - s > 0.05) fly(c, new T.Vector3(p.x, s, p.z), { dur: 120 + 60 * Math.sqrt(p.y - s), done: () => clink(0.08) });
+    }
+  }
+  // 游標底下最前面的是哪枚籌碼或哪張桌上的牌（自己的手牌不算，那是出牌用的）
+  function tableAt(e) {
+    aim(e);
+    const objs = allChips().concat(tiles.filter(t => !(t.zone === 'hand' && t.owner === 0)).map(t => t.g));
+    const hit = raycaster.intersectObjects(objs, true).find(h => h.object.visible);
+    if (!hit) return null;
+    const tile = hit.object.parent.userData.tile;
+    if (tile) return { tile, point: hit.point };
+    return busy(hit.object) ? null : { chip: columnTop(hit.object, null) };
+  }
+  function grabChip(chip, e) {
+    toy = { chip, id: e.pointerId, x: e.clientX, y: e.clientY, drag: false, to: chip.position.clone() };
+  }
+  function dragChip(e) {
+    if (!toy.drag) {
+      if (Math.hypot(e.clientX - toy.x, e.clientY - toy.y) < 6) return;
+      toy.drag = true;
+      toy.chip.userData.loose = true;
+      toy.chip.rotation.set(0, 0, 0);
+      clink(0.1);
+    }
+    aim(e);
+    if (!raycaster.ray.intersectPlane(dragPlane, toy.to)) return;
+    toy.to.x = Math.max(-CHIP_REACH, Math.min(CHIP_REACH, toy.to.x));
+    toy.to.z = Math.max(-CHIP_REACH, Math.min(CHIP_REACH, toy.to.z));
+  }
+  // 放手：拖過就落下（疊到別的籌碼上），沒拖就是原地拋一下硬幣
+  function releaseChip() {
+    const { chip, drag } = toy;
+    toy = null;
+    chip.rotation.set(0, 0, 0);
+    if (drag) fly(chip, landAt(chip.position.x, chip.position.z, chip), { dur: 170, done: () => clink(0.14) });
+    else {
+      chip.userData.loose = true;
+      fly(chip, chip.position, { dur: 620, arc: 7, flip: Math.random() < 0.5 ? 2 : 3, done: () => { clink(0.14); setTimeout(() => clink(0.07), 70); } });
+    }
+  }
+  // 點桌上的牌：往遠離鏡頭的方向輕推一下，交給物理，停下來歪一點就留著（settleRest 會管）
+  function flick(t, point) {
+    if (t.tw || t.phys) return;
+    wakeTable(t.pos, t.pos, PITCH * 1.4);
+    if (!t.rest) return;
+    const r = t.rest, b = r.b;
+    const a = Math.atan2(point.z - camera.position.z, point.x - camera.position.x) + rnd(-0.5, 0.5), sp = rnd(11, 17);
+    b.wakeUp();
+    b.velocity.set(Math.cos(a) * sp, rnd(9, 15), Math.sin(a) * sp);
+    b.angularVelocity.set(rnd(-2, 2), rnd(-7, 7), rnd(-2, 2));
+    r.moved = true;
+    clack(0.3);
+  }
 
   // 每局換一組的固定亂數：同一個位置每次算出來都一樣，牌才不會自己亂動
   const jrand = k => { const x = Math.sin(k * 127.1 + S.seed * 311.7) * 43758.5453; return (x - Math.floor(x)) * 2 - 1; };
@@ -904,8 +1010,14 @@
     for (let i = 0; i < N; i++) sparkVel.push(new T.Vector3());
 
     canvas.addEventListener('pointermove', e => {
+      if (toy) {
+        if (toy.id === e.pointerId) dragChip(e);
+        canvas.style.cursor = toy.drag ? 'grabbing' : 'grab';
+        return;
+      }
       const idx = pick(e);
-      canvas.style.cursor = idx >= 0 ? 'pointer' : '';
+      const toyAt = idx < 0 && e.pointerType === 'mouse' ? tableAt(e) : null;
+      canvas.style.cursor = idx >= 0 ? 'pointer' : toyAt ? (toyAt.chip ? 'grab' : 'pointer') : '';
       const ht = handTileAt(e);
       hoverKind = ht ? ht.kind : -1;
       if (idx !== hover) { hover = idx; if (game) S.sync(); }
@@ -914,20 +1026,27 @@
     // 快點一下照舊（選取、再點一次打出，直接擺進牌池）；按住不放就是蓄力，放開把那張甩出去
     meter = document.getElementById('power');
     canvas.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || charge) return;
+      if (e.button !== 0 || charge || toy) return;
       const idx = pick(e);
-      if (idx < 0) return;
+      if (idx < 0) {
+        // 不是出牌：籌碼拿起來玩，桌上的牌推一下
+        const hit = tableAt(e);
+        if (hit && hit.chip) { grabChip(hit.chip, e); canvas.setPointerCapture(e.pointerId); }
+        else if (hit) flick(hit.tile, hit.point);
+        return;
+      }
       charge = { idx, id: e.pointerId, t0: performance.now(), p: 0, live: false };
       canvas.setPointerCapture(e.pointerId);
     });
     canvas.addEventListener('pointerup', e => {
+      if (toy && toy.id === e.pointerId) { releaseChip(); canvas.style.cursor = 'grab'; return; }
       const c = charge;
       if (!c || c.id !== e.pointerId) return;
       const fire = S.pickable && !!S.onPick;
       endCharge(!(fire && c.live));
       if (fire) S.onPick(c.idx, c.live ? c.p : null);
     });
-    canvas.addEventListener('pointercancel', () => endCharge(true));
+    canvas.addEventListener('pointercancel', () => { endCharge(true); if (toy) releaseChip(); });
     canvas.addEventListener('contextmenu', e => { if (charge) e.preventDefault(); });
     window.addEventListener('resize', resize);
     resize();
@@ -963,11 +1082,14 @@
   }
 
   // 游標底下是我哪張手牌（不管現在能不能出牌）
-  function handTileAt(e) {
-    if (!game) return null;
+  function aim(e) {
     const r = renderer.domElement.getBoundingClientRect();
     mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     raycaster.setFromCamera(mouse, camera);
+  }
+  function handTileAt(e) {
+    if (!game) return null;
+    aim(e);
     const mine = tiles.filter(t => t.zone === 'hand' && t.owner === 0).map(t => t.g);
     const hit = raycaster.intersectObjects(mine, true).find(h => h.object.visible);
     return hit ? hit.object.parent.userData.tile : null;
@@ -2183,8 +2305,16 @@
       if (k >= 1) k = 1;
       a.obj.position.lerpVectors(a.p0, a.p1, smooth(k));
       a.obj.position.y += a.arc * 4 * k * (1 - k);
-      if (k === 1) { props.splice(i, 1); if (a.done) a.done(); }
+      if (a.flip) a.obj.rotation.x = Math.PI * 2 * a.flip * smooth(k);
+      if (k === 1) { props.splice(i, 1); if (a.flip) a.obj.rotation.x = 0; if (a.done) a.done(); }
     }
+    // 拖著的籌碼跟著游標，往前拖時微微往前傾
+    if (toy && toy.drag) {
+      const c = toy.chip, vx = toy.to.x - c.position.x, vz = toy.to.z - c.position.z;
+      c.position.lerp(toy.to, Math.min(1, dt * 18));
+      c.rotation.set(Math.max(-0.5, Math.min(0.5, vz * 0.08)), 0, Math.max(-0.5, Math.min(0.5, -vx * 0.08)));
+    }
+    if (now > nextFall) { nextFall = now + 250; dropLoose(); }
 
     // 牌底的貼地暗影：牌離桌面越高越淡
     for (const t of tiles) {
